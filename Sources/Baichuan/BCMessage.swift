@@ -1,0 +1,60 @@
+import Foundation
+
+/// Known message ids.
+public enum BCMsgID {
+    public static let login: UInt32 = 1
+    public static let logout: UInt32 = 2
+    public static let video: UInt32 = 3
+    public static let videoStop: UInt32 = 4
+    public static let ptzControl: UInt32 = 18
+    public static let setISP: UInt32 = 25
+    public static let getISP: UInt32 = 26
+    public static let ping: UInt32 = 93
+    public static let getLEDState: UInt32 = 208
+    public static let setLEDState: UInt32 = 209
+    public static let udpKeepAlive: UInt32 = 234
+}
+
+/// A decoded (or to-be-encoded) Baichuan message.
+public struct BCMessage: Sendable {
+    public enum Payload: Sendable {
+        case xml(String)
+        case binary(Data)
+    }
+
+    public var msgId: UInt32
+    public var channelId: UInt8
+    public var streamType: UInt8
+    public var msgNum: UInt16
+    public var responseCode: UInt16
+    public var msgClass: UInt16
+    /// Decrypted extension XML, if present.
+    public var extensionXML: String?
+    /// Decrypted XML or raw binary payload, if present.
+    public var payload: Payload?
+
+    public init(msgId: UInt32, channelId: UInt8 = 0, streamType: UInt8 = 0, msgNum: UInt16,
+                responseCode: UInt16 = 0, msgClass: UInt16 = BCHeader.classModern,
+                extensionXML: String? = nil, payload: Payload? = nil) {
+        self.msgId = msgId
+        self.channelId = channelId
+        self.streamType = streamType
+        self.msgNum = msgNum
+        self.responseCode = responseCode
+        self.msgClass = msgClass
+        self.extensionXML = extensionXML
+        self.payload = payload
+    }
+
+    public var xml: String? {
+        if case .xml(let s)? = payload { return s }
+        return nil
+    }
+
+    public var binary: Data? {
+        if case .binary(let d)? = payload { return d }
+        return nil
+    }
+
+    public var isOK: Bool { responseCode == 200 }
+}
