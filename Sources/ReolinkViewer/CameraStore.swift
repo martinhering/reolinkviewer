@@ -108,6 +108,15 @@ final class CameraStore: ObservableObject {
         apply(list)
     }
 
+    /// Writes `name` into the camera's picture (its OSD channel name), using the running
+    /// session's connection if there is one, else a short-lived one.
+    func writeNameToCamera(_ camera: CameraSettings, name: String) async throws {
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        try await client.connect()
+        defer { Task { await client.disconnect() } }
+        try await client.setOSDName(name)
+    }
+
     // MARK: Selection
 
     /// Shows `id` on its own, leaving the grid if needed.

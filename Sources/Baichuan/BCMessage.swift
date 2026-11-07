@@ -8,6 +8,9 @@ public enum BCMsgID {
     public static let videoStop: UInt32 = 4
     public static let ptzControl: UInt32 = 18
     public static let setISP: UInt32 = 25
+    /// Reads the on-screen display settings (`Osd` with `OsdChannelName`); 45 writes them back.
+    public static let getOSD: UInt32 = 44
+    public static let setOSD: UInt32 = 45
     public static let getISP: UInt32 = 26
     /// Returns the user list (and, on some firmware, more system information).
     public static let getUsers: UInt32 = 58

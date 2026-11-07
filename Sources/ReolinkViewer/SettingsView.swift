@@ -124,11 +124,24 @@ struct CameraForm: View {
     /// Called after the camera accepted a new password.
     let onPasswordChanged: (String) -> Void
     @State private var changingPassword = false
+    @EnvironmentObject private var store: CameraStore
+    @State private var writingName = false
+    @State private var nameResult: String?
+    @State private var nameResultIsError = false
 
     var body: some View {
         Form {
             Section("Camera") {
-                TextField("Name", text: $camera.name, prompt: Text("Living room"))
+                HStack {
+                    TextField("Name", text: $camera.name, prompt: Text("Living room"))
+                    Button("Write to Camera") { writeName() }
+                        .disabled(writingName || camera.name.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || camera.host.trimmingCharacters(in: .whitespaces).isEmpty || camera.username.isEmpty)
+                        .help("Make the camera show this name in its picture (the on-screen display)")
+                }
+                if let nameResult {
+                    Text(nameResult).font(.caption).foregroundStyle(nameResultIsError ? .red : .secondary)
+                }
                 TextField("Address", text: $camera.host, prompt: Text("192.168.1.20"))
                 TextField("Port", value: $camera.port, format: .number.grouping(.never), prompt: Text("9000"))
                 TextField("Username", text: $camera.username)
@@ -151,6 +164,7 @@ struct CameraForm: View {
             }
         }
         .formStyle(.grouped)
+        .onChange(of: camera.id) { _, _ in nameResult = nil }
         .sheet(isPresented: $changingPassword) {
             ChangePasswordSheet(camera: camera) { newPassword in
                 changingPassword = false
@@ -158,6 +172,28 @@ struct CameraForm: View {
             } onCancel: {
                 changingPassword = false
             }
+        }
+    }
+}
+
+extension CameraForm {
+    /// Writes the form's name into the camera's picture, with the form's current credentials.
+    fileprivate func writeName() {
+        var target = camera
+        target.host = target.host.trimmingCharacters(in: .whitespaces)
+        let name = camera.name.trimmingCharacters(in: .whitespaces)
+        writingName = true
+        nameResult = nil
+        Task {
+            do {
+                try await store.writeNameToCamera(target, name: name)
+                nameResult = "The camera now shows “\(name)”."
+                nameResultIsError = false
+            } catch {
+                nameResult = "Could not write the name: \(error)"
+                nameResultIsError = true
+            }
+            writingName = false
         }
     }
 }

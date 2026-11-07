@@ -336,3 +336,33 @@ final class SpotlightTests: XCTestCase {
         XCTAssertEqual(reader.int("/body/FloodlightManual/duration"), 180)
     }
 }
+
+final class OSDConfigTests: XCTestCase {
+    let xml = """
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <body>
+    <OsdDatetime version="1.1">
+    <channelId>0</channelId>
+    <enable>1</enable>
+    </OsdDatetime>
+    <OsdChannelName version="1.1">
+    <channelId>0</channelId>
+    <name>Roomcam Admin</name>
+    <enable>1</enable>
+    <topLeftX>65536</topLeftX>
+    </OsdChannelName>
+    </body>
+    """
+
+    func testReadsName() {
+        XCTAssertEqual(OSDConfig.name(in: xml), "Roomcam Admin")
+        XCTAssertNil(OSDConfig.name(in: "<body/>"))
+    }
+
+    func testReplacesOnlyTheName() {
+        let out = OSDConfig.replacingName(in: xml, with: "Room <Admin> & Co")
+        XCTAssertEqual(out, xml.replacingOccurrences(of: "<name>Roomcam Admin</name>", with: "<name>Room &lt;Admin&gt; &amp; Co</name>"))
+        XCTAssertEqual(OSDConfig.name(in: out!), "Room <Admin> & Co")
+        XCTAssertNil(OSDConfig.replacingName(in: "<body/>", with: "x"))
+    }
+}

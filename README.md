@@ -56,7 +56,8 @@ Alternatively `open Package.swift` in Xcode and run the `ReolinkViewer` scheme. 
 
 On first launch open Settings (⌘,), click **+**, enter the camera's name, address, username
 and password, and click Apply. The password goes into your login keychain, the rest into
-user defaults. A camera fresh out of the box, not yet set up in the Reolink app, accepts
+user defaults. **Write to Camera** next to the name makes the camera burn that name into its
+picture too, in place of the factory name. A camera fresh out of the box, not yet set up in the Reolink app, accepts
 `admin` with an empty password. **Set Password on Camera…** in the camera's settings gives it
 one: the app logs in with the form's current password, changes it on the camera, checks that
 the new one works and stores it in the keychain. The same button changes an existing password. Add as many cameras as you like the same way; drag them to change their order.
@@ -106,6 +107,7 @@ export BC_PASSWORD='…'
 .build/debug/bctool led      --host 192.168.1.20 --state off      # blue status LED; omit to read
 .build/debug/bctool light    --host 192.168.1.20 --state on       # white spotlight, 180 s; omit to probe
 .build/debug/bctool daynight --host 192.168.1.20 --mode color     # auto | color | bw; omit to read
+.build/debug/bctool osd      --host 192.168.1.20 --name 'Garden'  # name shown in the picture; omit to read
 .build/debug/bctool users    --host 192.168.1.20                  # list user accounts
 .build/debug/bctool passwd   --host 192.168.1.20 --new 'secret'   # change the password, then log in with it
 ```
@@ -199,6 +201,10 @@ it, port it or compare against another camera.
   `InputAdvanceCfg`, about 2 KB of XML); `InputAdvanceCfg/DayNight/mode` is `auto`,
   `color` or `blackAndWhite`. To change it the whole document is sent back with id 25
   and only that element edited, which is what the official client does too.
+- On-screen display: message id 44 returns `OsdDatetime`, `OsdChannelName` (`name`,
+  `enable`, position) and `OsdFlowData`; id 45 takes the same document back with the name
+  changed, the way Day & Night is written. Reading follows reolink_aio; the write (verified
+  on the fixed camera) is the get/set pairing the other settings use.
 - Users: message id 58 with an `Extension` naming `userName` returns a `UserList` of `User`
   entries (`userName`, `userId`, `userLevel` 1 = administrator, `loginState`). Message id 59
   sends the whole list back; each entry has `userSetState` `none`, `add`, `delete` or

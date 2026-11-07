@@ -392,6 +392,48 @@ public actor BaichuanCamera {
         spotlightHandler?(on)
     }
 
+    // MARK: On-screen display
+
+    /// The camera's OSD configuration XML (channel name and time stamp overlays).
+    public func getOSDConfigXML() async throws -> String {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.getOSD, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(channelId: channelId)))
+        let reply = try await sub.next(timeout: 5)
+        guard reply.responseCode == 200, let xml = reply.xml, let end = xml.lastIndex(of: ">") else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "expected OSD configuration")
+        }
+        return String(xml[...end])
+    }
+
+    /// The name the camera burns into the picture.
+    public func getOSDName() async throws -> String {
+        let xml = try await getOSDConfigXML()
+        guard let name = OSDConfig.name(in: xml) else { throw BCError.malformedXML("no OsdChannelName in OSD configuration") }
+        return name
+    }
+
+    /// Reads the OSD configuration, changes only the channel name, and writes it back.
+    public func setOSDName(_ name: String) async throws {
+        let xml = try await getOSDConfigXML()
+        guard let updated = OSDConfig.replacingName(in: xml, with: name) else {
+            throw BCError.malformedXML("no OsdChannelName in OSD configuration")
+        }
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.setOSD, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(channelId: channelId), payload: .xml(updated)))
+        guard let reply = try? await sub.next(timeout: 2) else { return }
+        guard reply.responseCode == 200 else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "OSD configuration rejected")
+        }
+    }
+
     // MARK: Day & Night (ISP configuration)
 
     /// The camera's full ISP configuration XML (VideoInput + InputAdvanceCfg).
@@ -578,6 +620,27 @@ enum SpotlightStatus {
             return status != 0
         }
         return nil
+    }
+}
+
+enum OSDConfig {
+    private static func nameRange(in xml: String) -> Range<String.Index>? {
+        // The element carries a version attribute: <OsdChannelName version="1.1">.
+        guard let start = xml.range(of: "<OsdChannelName"),
+              let end = xml.range(of: "</OsdChannelName>", range: start.upperBound..<xml.endIndex),
+              let nameStart = xml.range(of: "<name>", range: start.upperBound..<end.lowerBound),
+              let nameEnd = xml.range(of: "</name>", range: nameStart.upperBound..<end.lowerBound) else { return nil }
+        return nameStart.upperBound..<nameEnd.lowerBound
+    }
+
+    static func name(in xml: String) -> String? {
+        nameRange(in: xml).map { BCXML.unescape(String(xml[$0])) }
+    }
+
+    /// Replaces the text of `<OsdChannelName><name>…</name>` and leaves every other byte
+    /// untouched, so the configuration goes back exactly as the camera produced it.
+    static func replacingName(in xml: String, with name: String) -> String? {
+        nameRange(in: xml).map { xml.replacingCharacters(in: $0, with: BCXML.escape(name)) }
     }
 }
 

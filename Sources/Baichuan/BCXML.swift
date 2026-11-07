@@ -80,6 +80,12 @@ public enum BCXML {
         return out
     }
 
+    public static func unescape(_ text: String) -> String {
+        text.replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"").replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
     /// The whole user list as sent with message 59. Each entry carries its `setState`;
     /// `password` is only included for users being added or modified.
     public static func userList(_ users: [CameraUser]) -> String {

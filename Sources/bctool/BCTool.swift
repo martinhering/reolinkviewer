@@ -95,6 +95,13 @@ struct BCTool {
                     print("spotlight switched \(stateText)" + (stateText == "on" ? " for \(seconds) s" : ""))
                 }
                 try await Task.sleep(for: .seconds(2))  // let the camera report the change
+            case "osd":
+                if flags.contains("verbose") { print(try await camera.getOSDConfigXML()) }
+                if let name = options["name"] {
+                    try await camera.setOSDName(name)
+                    print("OSD name set to \(name)")
+                }
+                print("OSD name: \(try await camera.getOSDName())")
             case "daynight":
                 if let modeText = options["mode"] {
                     let mode: DayNightMode
@@ -217,6 +224,7 @@ struct BCTool {
           bctool ir     --host H [--mode auto|on|off]        (infrared LEDs)
           bctool led    --host H [--state on|off]            (blue status LED)
           bctool light  --host H [--state on|off] [--seconds 180]   (white spotlight, if present)
+          bctool osd    --host H [--name N]                  (name shown in the picture; --verbose dumps the XML)
           bctool daynight --host H [--mode auto|color|bw]    (colour vs. monochrome picture)
           bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
           bctool users  --host H                             (list user accounts)
