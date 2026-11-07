@@ -2,6 +2,165 @@ import Baichuan
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var store: CameraStore
+
+    var body: some View {
+        Group {
+            if store.cameras.isEmpty {
+                noCameras
+            } else if store.showsGrid {
+                CameraGridView()
+            } else if let session = store.selectedSession {
+                SingleCameraView()
+                    .environmentObject(session)
+                    .id(session.settings.id)
+            }
+        }
+        .background(Color.black)
+        .frame(minWidth: 640, minHeight: 360)
+        .navigationTitle(title)
+        .onAppear { store.start() }
+        .toolbar {
+            if store.cameras.count > 1 {
+                ToolbarItem(placement: .navigation) {
+                    Picker("Camera", selection: cameraSelection) {
+                        ForEach(store.cameras) { camera in
+                            Text(camera.displayName).tag(camera.id)
+                        }
+                        Divider()
+                        Text("All Cameras").tag(allCamerasTag)
+                    }
+                    .help("Choose the camera to view (⌘1 … ⌘9), or show all of them (⌘0)")
+                }
+            }
+            if !store.showsGrid, let session = store.selectedSession {
+                ToolbarItem(placement: .principal) {
+                    Picker("Stream", selection: $store.streamKind) {
+                        Text("Clear").tag(StreamKind.main)
+                        Text("Fluent").tag(StreamKind.sub)
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Clear: full resolution main stream. Fluent: low-resolution sub stream.")
+                }
+                ToolbarItem {
+                    Button {
+                        store.audioEnabled.toggle()
+                    } label: {
+                        Label(store.audioEnabled ? "Mute" : "Unmute",
+                              systemImage: store.audioEnabled ? "speaker.wave.2" : "speaker.slash")
+                    }
+                    .help(store.audioEnabled ? "Sound from the camera's microphone is on; click to mute"
+                                             : "Muted; click to hear the camera's microphone")
+                }
+                ToolbarItem {
+                    SpotlightButton(session: session)
+                }
+                ToolbarItem {
+                    NightVisionMenu(session: session)
+                }
+            }
+            if !store.cameras.isEmpty {
+                ToolbarItem {
+                    Button { store.reconnect() } label: { Label("Reconnect", systemImage: "arrow.clockwise") }
+                        .help(store.showsGrid ? "Reconnect to all cameras" : "Reconnect to the camera")
+                }
+            }
+            ToolbarItem {
+                SettingsLink { Label("Settings", systemImage: "gearshape") }
+            }
+        }
+    }
+
+    private let allCamerasTag = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    /// The camera menu's selection: a camera id, or the all-zero id for the grid.
+    private var cameraSelection: Binding<UUID> {
+        Binding(
+            get: { store.showsGrid ? allCamerasTag : (store.selectedID ?? allCamerasTag) },
+            set: { id in
+                if id == allCamerasTag { store.layout = .grid } else { store.show(id) }
+            })
+    }
+
+    private var title: String {
+        if store.cameras.isEmpty { return "Reolink Viewer" }
+        if store.showsGrid { return "All Cameras" }
+        return store.selectedCamera?.displayName ?? "Reolink Viewer"
+    }
+
+    private var noCameras: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "video.slash").font(.largeTitle)
+            Text("Add a camera in Settings (⌘,)").multilineTextAlignment(.center)
+        }
+        .foregroundStyle(.secondary)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Switches the white spotlight. Shown only for cameras that have one.
+struct SpotlightButton: View {
+    @ObservedObject var session: CameraSession
+
+    var body: some View {
+        if session.hasSpotlight {
+            Toggle(isOn: Binding(get: { session.spotlight }, set: { session.setSpotlight($0) })) {
+                Label(session.spotlight ? "Spotlight off" : "Spotlight on",
+                      systemImage: session.spotlight ? "lightbulb.fill" : "lightbulb")
+            }
+            .toggleStyle(.button)
+            .help(session.spotlight ? "The spotlight is on; click to switch it off"
+                                    : "Switch the camera's white spotlight on")
+        }
+    }
+}
+
+/// The Day & Night and infrared menu for one camera. A view of its own so it follows the
+/// session's published state.
+struct NightVisionMenu: View {
+    @ObservedObject var session: CameraSession
+
+    var body: some View {
+        Menu {
+            Section("Picture") {
+                Picker("Day & Night", selection: dayNightBinding) {
+                    Text("Auto").tag(DayNightMode.auto)
+                    Text("Color").tag(DayNightMode.color)
+                    Text("Black & White").tag(DayNightMode.blackAndWhite)
+                }
+                .pickerStyle(.inline)
+            }
+            Section("Infrared LEDs") {
+                Picker("Infrared", selection: infraredBinding) {
+                    Text("Auto").tag(InfraredMode.auto)
+                    Text("On").tag(InfraredMode.on)
+                    Text("Off").tag(InfraredMode.off)
+                }
+                .pickerStyle(.inline)
+            }
+        } label: {
+            Label("Night vision", systemImage: nightVisionSymbol)
+        }
+        .disabled(session.infrared == nil && session.dayNight == nil)
+        .help("Picture: \(session.dayNight?.label ?? "unknown") · Infrared LEDs: \(session.infrared?.label ?? "unknown")")
+    }
+
+    private var infraredBinding: Binding<InfraredMode> {
+        Binding(get: { session.infrared ?? .auto }, set: { session.setInfrared($0) })
+    }
+
+    private var dayNightBinding: Binding<DayNightMode> {
+        Binding(get: { session.dayNight ?? .auto }, set: { session.setDayNight($0) })
+    }
+
+    private var nightVisionSymbol: String {
+        session.dayNight == .auto && session.infrared == .auto ? "moon" : "moon.fill"
+    }
+}
+
+/// One camera filling the window, with the pan/tilt pad and status badge over the picture.
+struct SingleCameraView: View {
     @EnvironmentObject private var session: CameraSession
     @FocusState private var focused: Bool
     /// Centre of the pan/tilt pad as a fraction of the view size; negative = default (bottom right).
@@ -23,76 +182,22 @@ struct ContentView: View {
             }
         }
         .overlay {
-            GeometryReader { geo in
-                PTZPad(
-                    onDrag: { value in movePad(by: value.translation, in: geo.size) },
-                    onDragEnd: { padDragOrigin = nil },
-                    onReset: { padFractionX = -1; padFractionY = -1 }
-                )
-                .position(padCenter(in: geo.size))
+            if session.supportsPTZ {
+                GeometryReader { geo in
+                    PTZPad(
+                        onDrag: { value in movePad(by: value.translation, in: geo.size) },
+                        onDragEnd: { padDragOrigin = nil },
+                        onReset: { padFractionX = -1; padFractionY = -1 }
+                    )
+                    .position(padCenter(in: geo.size))
+                }
             }
         }
-        .background(Color.black)
-        .frame(minWidth: 640, minHeight: 360)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
         .onKeyPress(phases: [.down, .up], action: handleKey)
-        .onAppear {
-            focused = true
-            session.start()
-        }
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("Stream", selection: $session.streamKind) {
-                    Text("Clear").tag(StreamKind.main)
-                    Text("Fluent").tag(StreamKind.sub)
-                }
-                .pickerStyle(.segmented)
-                .help("Clear: full resolution main stream. Fluent: low-resolution sub stream.")
-            }
-            ToolbarItem {
-                Button {
-                    session.audioEnabled.toggle()
-                } label: {
-                    Label(session.audioEnabled ? "Mute" : "Unmute",
-                          systemImage: session.audioEnabled ? "speaker.wave.2" : "speaker.slash")
-                }
-                .help(session.audioEnabled ? "Sound from the camera's microphone is on; click to mute"
-                                           : "Muted; click to hear the camera's microphone")
-            }
-            ToolbarItem {
-                Menu {
-                    Section("Picture") {
-                        Picker("Day & Night", selection: dayNightBinding) {
-                            Text("Auto").tag(DayNightMode.auto)
-                            Text("Color").tag(DayNightMode.color)
-                            Text("Black & White").tag(DayNightMode.blackAndWhite)
-                        }
-                        .pickerStyle(.inline)
-                    }
-                    Section("Infrared LEDs") {
-                        Picker("Infrared", selection: infraredBinding) {
-                            Text("Auto").tag(InfraredMode.auto)
-                            Text("On").tag(InfraredMode.on)
-                            Text("Off").tag(InfraredMode.off)
-                        }
-                        .pickerStyle(.inline)
-                    }
-                } label: {
-                    Label("Night vision", systemImage: nightVisionSymbol)
-                }
-                .disabled(session.infrared == nil && session.dayNight == nil)
-                .help("Picture: \(session.dayNight?.label ?? "unknown") · Infrared LEDs: \(session.infrared?.label ?? "unknown")")
-            }
-            ToolbarItem {
-                Button { session.start() } label: { Label("Reconnect", systemImage: "arrow.clockwise") }
-                    .help("Reconnect to the camera")
-            }
-            ToolbarItem {
-                SettingsLink { Label("Settings", systemImage: "gearshape") }
-            }
-        }
+        .onAppear { focused = true }
     }
 
     // MARK: Pan/tilt pad placement
@@ -124,18 +229,6 @@ struct ContentView: View {
         let p = clampedPadCenter(CGPoint(x: origin.x + translation.width, y: origin.y + translation.height), in: size)
         padFractionX = p.x / size.width
         padFractionY = p.y / size.height
-    }
-
-    private var infraredBinding: Binding<InfraredMode> {
-        Binding(get: { session.infrared ?? .auto }, set: { session.setInfrared($0) })
-    }
-
-    private var dayNightBinding: Binding<DayNightMode> {
-        Binding(get: { session.dayNight ?? .auto }, set: { session.setDayNight($0) })
-    }
-
-    private var nightVisionSymbol: String {
-        session.dayNight == .auto && session.infrared == .auto ? "moon" : "moon.fill"
     }
 
     private var placeholder: some View {
@@ -181,6 +274,7 @@ struct ContentView: View {
     }
 
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        guard session.supportsPTZ else { return .ignored }
         let direction: PTZDirection
         switch press.key {
         case .leftArrow: direction = .left
@@ -195,6 +289,79 @@ struct ContentView: View {
         default: break
         }
         return .handled
+    }
+}
+
+/// Every camera at once, on the sub stream and muted. Clicking a tile opens that camera.
+struct CameraGridView: View {
+    @EnvironmentObject private var store: CameraStore
+    private let spacing: CGFloat = 4
+
+    var body: some View {
+        GeometryReader { geo in
+            let count = store.cameras.count
+            let columns = max(1, Int(Double(count).squareRoot().rounded(.up)))
+            let rows = (count + columns - 1) / columns
+            let maxWidth = (geo.size.width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+            let maxHeight = (geo.size.height - spacing * CGFloat(rows - 1)) / CGFloat(rows)
+            let width = max(1, min(maxWidth, maxHeight * 16 / 9))
+            let height = width * 9 / 16
+            VStack(spacing: spacing) {
+                ForEach(0..<rows, id: \.self) { row in
+                    HStack(spacing: spacing) {
+                        ForEach(store.cameras.dropFirst(row * columns).prefix(columns)) { camera in
+                            if let session = store.session(for: camera) {
+                                CameraTile(session: session, name: camera.displayName) { store.show(camera.id) }
+                                    .frame(width: width, height: height)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct CameraTile: View {
+    @ObservedObject var session: CameraSession
+    let name: String
+    let onSelect: () -> Void
+
+    var body: some View {
+        ZStack {
+            VideoView(renderer: session.renderer)
+            if !session.isLive {
+                VStack(spacing: 8) {
+                    if session.state == .connecting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "video.slash").font(.title)
+                    }
+                    Text(session.statusText).font(.caption).multilineTextAlignment(.center).lineLimit(3)
+                }
+                .foregroundStyle(.secondary)
+                .padding(16)
+            }
+            VStack {
+                HStack(spacing: 6) {
+                    Circle().fill(session.isLive ? Color.green : Color.orange).frame(width: 8, height: 8)
+                    Text(name).lineLimit(1)
+                }
+                .font(.callout)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                Spacer()
+            }
+        }
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
+        .help("Click to view \(name) on its own")
     }
 }
 

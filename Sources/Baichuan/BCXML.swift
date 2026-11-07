@@ -24,6 +24,17 @@ public struct XMLReader {
         string(xpath).flatMap { Int($0) }
     }
 
+    /// Name/value pairs of the child elements of every node matching `xpath`.
+    public func childrenOfEach(_ xpath: String) -> [[(String, String)]] {
+        guard let nodes = try? document.nodes(forXPath: xpath) else { return [] }
+        return nodes.map { node in
+            (node.children ?? []).compactMap { child in
+                guard child.kind == .element, let name = child.name else { return nil }
+                return (name, child.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            }
+        }
+    }
+
     /// Name/value pairs of all child elements of the node at `xpath`.
     public func children(_ xpath: String) -> [(String, String)] {
         guard let nodes = try? document.nodes(forXPath: xpath), let first = nodes.first else { return [] }
@@ -45,6 +56,44 @@ public enum BCXML {
 
     public static func extensionDocument(channelId: UInt8) -> String {
         "\(declaration)<Extension version=\"\(version)\">\n<channelId>\(channelId)</channelId>\n</Extension>\n"
+    }
+
+    /// Extension naming the user a request is about (used when reading the user list).
+    public static func extensionDocument(userName: String) -> String {
+        "\(declaration)<Extension version=\"\(version)\">\n<userName>\(escape(userName))</userName>\n</Extension>\n"
+    }
+
+    /// Escapes the five XML special characters for use in element text.
+    public static func escape(_ text: String) -> String {
+        var out = ""
+        out.reserveCapacity(text.count)
+        for c in text {
+            switch c {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            case "'": out += "&apos;"
+            default: out.append(c)
+            }
+        }
+        return out
+    }
+
+    /// The whole user list as sent with message 59. Each entry carries its `setState`;
+    /// `password` is only included for users being added or modified.
+    public static func userList(_ users: [CameraUser]) -> String {
+        var inner = "<UserList version=\"\(version)\">\n"
+        for user in users {
+            inner += "<User>\n<userName>\(escape(user.userName))</userName>\n"
+            if let password = user.password { inner += "<password>\(escape(password))</password>\n" }
+            if let id = user.userId { inner += "<userId>\(id)</userId>\n" }
+            inner += "<userLevel>\(user.userLevel)</userLevel>\n"
+            if let state = user.loginState { inner += "<loginState>\(state)</loginState>\n" }
+            inner += "<userSetState>\(user.setState.rawValue)</userSetState>\n</User>\n"
+        }
+        inner += "</UserList>\n"
+        return body(inner)
     }
 
     public static func login(userHash: String, passwordHash: String) -> String {
@@ -86,6 +135,19 @@ public enum BCXML {
         <state>\(state)</state>
         <lightState>\(lightState)</lightState>
         </LedState>
+
+        """)
+    }
+
+    /// `status` 1 switches the spotlight on, 0 off; `duration` is how long, in seconds, the
+    /// manual setting holds before the camera goes back to its automatic behaviour.
+    public static func floodlightManual(channelId: UInt8, on: Bool, duration: UInt16) -> String {
+        body("""
+        <FloodlightManual version="1">
+        <channelId>\(channelId)</channelId>
+        <status>\(on ? 1 : 0)</status>
+        <duration>\(duration)</duration>
+        </FloodlightManual>
 
         """)
     }

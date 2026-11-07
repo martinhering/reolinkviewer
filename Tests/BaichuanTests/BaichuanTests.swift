@@ -247,3 +247,92 @@ final class ADTSTests: XCTestCase {
         XCTAssertNil(ADTSHeader(parsing: Data([0xFF, 0xF9])))
     }
 }
+
+final class UserListTests: XCTestCase {
+    func testParsesUserListReply() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" ?>
+        <body>
+        <UserList version="1.1">
+        <User>
+        <userName>admin</userName>
+        <userId>0</userId>
+        <userLevel>1</userLevel>
+        <loginState>1</loginState>
+        <userSetState>none</userSetState>
+        </User>
+        <User>
+        <userName>guest</userName>
+        <userId>1</userId>
+        <userLevel>0</userLevel>
+        <loginState>0</loginState>
+        <userSetState>none</userSetState>
+        </User>
+        </UserList>
+        </body>
+        \u{0}\u{0}
+        """
+        let users = try CameraUser.parseList(xml)
+        XCTAssertEqual(users, [
+            CameraUser(userName: "admin", userId: 0, userLevel: 1, loginState: 1),
+            CameraUser(userName: "guest", userId: 1, userLevel: 0, loginState: 0),
+        ])
+        XCTAssertTrue(users[0].isAdministrator)
+        XCTAssertFalse(users[1].isAdministrator)
+    }
+
+    func testBuildsModifyRequestWithEscapedPassword() throws {
+        var admin = CameraUser(userName: "admin", userId: 0, userLevel: 1, loginState: 1)
+        admin.password = "a<b&c\"d'e>"
+        admin.setState = .modify
+        let guest = CameraUser(userName: "guest", userId: 1, userLevel: 0, loginState: 0)
+        let xml = BCXML.userList([admin, guest])
+        let reader = try XMLReader(xml)
+        let entries = reader.childrenOfEach("/body/UserList/User")
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(entries[0].map(\.0), ["userName", "password", "userId", "userLevel", "loginState", "userSetState"])
+        XCTAssertEqual(entries[0].first { $0.0 == "password" }?.1, "a<b&c\"d'e>")
+        XCTAssertEqual(entries[0].first { $0.0 == "userSetState" }?.1, "modify")
+        XCTAssertNil(entries[1].first { $0.0 == "password" }, "untouched users carry no password")
+        XCTAssertEqual(entries[1].first { $0.0 == "userSetState" }?.1, "none")
+        XCTAssertEqual(reader.string("/body/UserList/@version"), "1.1")
+    }
+
+    func testUserNameExtension() throws {
+        let reader = try XMLReader(BCXML.extensionDocument(userName: "admin"))
+        XCTAssertEqual(reader.string("/Extension/userName"), "admin")
+    }
+}
+
+final class SpotlightTests: XCTestCase {
+    func testParsesStatusList() {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" ?>
+        <body>
+        <FloodlightStatusList version="1.1">
+        <FloodlightStatus>
+        <channel>0</channel>
+        <status>1</status>
+        <brightness>100</brightness>
+        </FloodlightStatus>
+        </FloodlightStatusList>
+        </body>
+        """
+        XCTAssertEqual(SpotlightStatus.parse(xml, channelId: 0), true)
+        XCTAssertNil(SpotlightStatus.parse(xml, channelId: 1))
+        XCTAssertEqual(SpotlightStatus.parse(xml.replacingOccurrences(of: "<status>1", with: "<status>0"), channelId: 0), false)
+    }
+
+    func testEmptyStatusListHasNoState() {
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<FloodlightStatusList version=\"1.1\" />\n</body>\n"
+        XCTAssertNil(SpotlightStatus.parse(xml, channelId: 0))
+    }
+
+    func testManualCommand() throws {
+        let reader = try XMLReader(BCXML.floodlightManual(channelId: 0, on: true, duration: 180))
+        XCTAssertEqual(reader.string("/body/FloodlightManual/@version"), "1")
+        XCTAssertEqual(reader.children("/body/FloodlightManual").map(\.0), ["channelId", "status", "duration"])
+        XCTAssertEqual(reader.int("/body/FloodlightManual/status"), 1)
+        XCTAssertEqual(reader.int("/body/FloodlightManual/duration"), 180)
+    }
+}

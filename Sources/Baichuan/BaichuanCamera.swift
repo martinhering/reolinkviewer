@@ -80,6 +80,48 @@ public struct DeviceInfo: Sendable {
     }
 }
 
+/// One entry of the camera's user list.
+public struct CameraUser: Sendable, Equatable {
+    /// What message 59 should do with this entry.
+    public enum SetState: String, Sendable {
+        case none, add, delete, modify
+    }
+
+    public var userName: String
+    /// Only sent when adding or modifying; the camera never returns it.
+    public var password: String?
+    public var userId: Int?
+    /// 0 = user, 1 = administrator.
+    public var userLevel: Int
+    /// 1 for the user of the current session, as far as is known.
+    public var loginState: Int?
+    public var setState: SetState = .none
+
+    public var isAdministrator: Bool { userLevel == 1 }
+
+    public init(userName: String, password: String? = nil, userId: Int? = nil, userLevel: Int,
+                loginState: Int? = nil, setState: SetState = .none) {
+        self.userName = userName
+        self.password = password
+        self.userId = userId
+        self.userLevel = userLevel
+        self.loginState = loginState
+        self.setState = setState
+    }
+
+    /// Parses the `UserList` of a message-58 reply.
+    static func parseList(_ xml: String) throws -> [CameraUser] {
+        let reader = try XMLReader(xml)
+        return reader.childrenOfEach("/body/UserList/User").compactMap { fields in
+            func value(_ name: String) -> String? { fields.first { $0.0 == name }?.1 }
+            guard let name = value("userName"), !name.isEmpty else { return nil }
+            return CameraUser(userName: name, userId: value("userId").flatMap { Int($0) },
+                              userLevel: value("userLevel").flatMap { Int($0) } ?? 0,
+                              loginState: value("loginState").flatMap { Int($0) })
+        }
+    }
+}
+
 /// High-level client for one Reolink camera over the Baichuan protocol.
 public actor BaichuanCamera {
     public let host: String
@@ -89,6 +131,10 @@ public actor BaichuanCamera {
     public let channelId: UInt8
 
     private var connection: BCConnection?
+    private var spotlightHandler: (@Sendable (Bool) -> Void)?
+    /// The spotlight state the camera last reported (message 291); nil until it reports one.
+    /// Cameras with a spotlight send it unasked right after login.
+    public private(set) var spotlightState: Bool?
     private var videoTask: Task<Void, Never>?
     public private(set) var deviceInfo: DeviceInfo?
     public var log: (@Sendable (String) -> Void)?
@@ -120,6 +166,7 @@ public actor BaichuanCamera {
     @discardableResult
     public func connect() async throws -> DeviceInfo {
         await disconnect()
+        spotlightState = nil
         let conn = BCConnection(host: host, port: port, password: password)
         if logPackets, let log { await conn.setLog(log) }
         try await conn.connect()
@@ -129,6 +176,7 @@ public actor BaichuanCamera {
                       msgNum: m.msgNum, responseCode: 200)
         }
         connection = conn
+        await installSpotlightHandler(on: conn)
         do {
             let info = try await login(conn)
             deviceInfo = info
@@ -256,6 +304,94 @@ public actor BaichuanCamera {
         try await setLEDState(state)
     }
 
+    /// Switches the blue status LED on the front, keeping the infrared mode as it is.
+    public func setStatusLight(_ on: Bool) async throws {
+        var state = try await getLEDState()
+        state.statusLight = on
+        try await setLEDState(state)
+    }
+
+    // MARK: Spotlight
+
+    /// The camera's answer to the spotlight settings request (message 438).
+    public struct SpotlightProbe: Sendable {
+        /// nil when the camera did not answer within the timeout.
+        public var replyCode: UInt16?
+        public var xml: String?
+        /// Code 200 with a `FloodlightTask` document.
+        public var hasSettings: Bool { replyCode == 200 && (xml?.contains("<FloodlightTask") ?? false) }
+    }
+
+    public func probeSpotlight() async -> SpotlightProbe {
+        guard let conn = connection else { return SpotlightProbe() }
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        do {
+            try await conn.send(BCMessage(msgId: BCMsgID.floodlightTasksRead, channelId: channelId, msgNum: num,
+                                          extensionXML: BCXML.extensionDocument(channelId: channelId)))
+            let reply = try await sub.next(timeout: 3)
+            return SpotlightProbe(replyCode: reply.responseCode, xml: reply.xml)
+        } catch {
+            return SpotlightProbe()
+        }
+    }
+
+    /// Whether the camera has a white spotlight: it either answers the spotlight settings
+    /// request (message 438) with a `FloodlightTask`, or reports a spotlight status of its own
+    /// after login. Some firmware refuses 438 (code 405) but does the latter, so this waits up
+    /// to `wait` seconds after the probe for that report.
+    public func hasSpotlight(wait: TimeInterval = 1.5) async -> Bool {
+        if await probeSpotlight().hasSettings { return true }
+        let deadline = Date().addingTimeInterval(wait)
+        while spotlightState == nil, Date() < deadline, connection != nil {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return spotlightState != nil
+    }
+
+    /// Switches the spotlight on or off (message 288). The camera holds the setting for
+    /// `duration` seconds and then returns to its automatic behaviour.
+    public func setSpotlight(_ on: Bool, duration: UInt16 = 180) async throws {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.floodlightManual, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(channelId: channelId),
+                                      payload: .xml(BCXML.floodlightManual(channelId: channelId, on: on, duration: duration))))
+        // Some cameras do not acknowledge a successful change.
+        guard let reply = try? await sub.next(timeout: 1) else { return }
+        guard reply.responseCode == 200 else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "spotlight command rejected")
+        }
+    }
+
+    /// Called with the new state whenever the camera reports that its spotlight went on or
+    /// off (message 291), including when a manual setting runs out. Survives reconnects.
+    public func setSpotlightHandler(_ handler: (@Sendable (Bool) -> Void)?) {
+        spotlightHandler = handler
+    }
+
+    /// Installed on every connection before login, so the report the camera sends right
+    /// after login is not lost.
+    private func installSpotlightHandler(on conn: BCConnection) async {
+        let channelId = self.channelId
+        let log = logPackets ? self.log : nil
+        await conn.setHandler(msgId: BCMsgID.floodlightStatusList) { @Sendable [weak self] m in
+            log?("spotlight status: \(m.xml ?? "(no XML)")")
+            if let xml = m.xml, let on = SpotlightStatus.parse(xml, channelId: channelId) {
+                Task { await self?.spotlightReported(on) }
+            }
+            return nil
+        }
+    }
+
+    private func spotlightReported(_ on: Bool) {
+        spotlightState = on
+        spotlightHandler?(on)
+    }
+
     // MARK: Day & Night (ISP configuration)
 
     /// The camera's full ISP configuration XML (VideoInput + InputAdvanceCfg).
@@ -299,6 +435,55 @@ public actor BaichuanCamera {
         guard reply.responseCode == 200 else {
             throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "ISP configuration rejected")
         }
+    }
+
+    // MARK: Users
+
+    /// The camera's user accounts (message 58).
+    public func getUsers() async throws -> [CameraUser] {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.getUsers, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(userName: username)))
+        let reply = try await sub.next(timeout: 5)
+        guard reply.responseCode == 200, let xml = reply.xml else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "expected UserList")
+        }
+        let users = try CameraUser.parseList(xml)
+        guard !users.isEmpty else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "reply has no UserList")
+        }
+        return users
+    }
+
+    /// Sends the whole user list back (message 59). Entries with `setState == .none` are left alone.
+    public func updateUsers(_ users: [CameraUser]) async throws {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.updateUserList, channelId: channelId, msgNum: num,
+                                      payload: .xml(BCXML.userList(users))))
+        // Some cameras do not acknowledge a successful change.
+        guard let reply = try? await sub.next(timeout: 2) else { return }
+        guard reply.responseCode == 200 else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "user list change rejected")
+        }
+    }
+
+    /// Changes the password of `userName` (default: the logged-in user). The current session
+    /// may stay up, but every new login needs the new password.
+    public func changePassword(to newPassword: String, for userName: String? = nil) async throws {
+        let target = userName ?? username
+        var users = try await getUsers()
+        guard let index = users.firstIndex(where: { $0.userName == target }) else {
+            throw BCError.unexpectedReply(msgId: BCMsgID.getUsers, code: 200, why: "no user named \(target)")
+        }
+        users[index].password = newPassword
+        users[index].setState = .modify
+        try await updateUsers(users)
     }
 
     // MARK: Video
@@ -379,6 +564,20 @@ extension BaichuanCamera {
 
     public func setLogPackets(_ on: Bool) {
         logPackets = on
+    }
+}
+
+enum SpotlightStatus {
+    /// The state for `channelId` in a `FloodlightStatusList`, or nil if it has none.
+    static func parse(_ xml: String, channelId: UInt8) -> Bool? {
+        guard let reader = try? XMLReader(xml) else { return nil }
+        for fields in reader.childrenOfEach("/body/FloodlightStatusList/FloodlightStatus") {
+            func value(_ name: String) -> String? { fields.first { $0.0 == name }?.1 }
+            guard value("channel").flatMap({ UInt8($0) }) ?? channelId == channelId,
+                  let status = value("status").flatMap({ Int($0) }) else { continue }
+            return status != 0
+        }
+        return nil
     }
 }
 

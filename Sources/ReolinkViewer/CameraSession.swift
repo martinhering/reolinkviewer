@@ -12,27 +12,33 @@ final class CameraSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var statusText = "Not connected"
     @Published private(set) var deviceSummary = ""
+    /// False once the camera reports `ptzMode = none` (a fixed camera); such cameras reject
+    /// PTZ commands with code 400.
+    @Published private(set) var supportsPTZ = true
     @Published private(set) var frameSize: CGSize = .zero
     @Published private(set) var fps: Double = 0
     /// Infrared illuminator mode as last read from or written to the camera; nil until connected.
     @Published private(set) var infrared: InfraredMode?
+    /// True once the camera has answered the spotlight probe; false for cameras without one.
+    @Published private(set) var hasSpotlight = false
+    /// Whether the white spotlight is on, as last switched or reported by the camera.
+    @Published private(set) var spotlight = false
     /// Day & Night image mode as last read from or written to the camera; nil until connected.
     @Published private(set) var dayNight: DayNightMode?
     @Published var streamKind: StreamKind = .main {
         didSet { if oldValue != streamKind { restartVideo() } }
     }
-    @Published var settings: CameraSettings = SettingsStore.load()
+    @Published private(set) var settings: CameraSettings
 
     let renderer = VideoRenderer()
     let audio = AudioPlayer()
-    /// Whether the camera's microphone is played back. Persisted.
-    @Published var audioEnabled: Bool = UserDefaults.standard.object(forKey: "audioEnabled") == nil
-        ? true : UserDefaults.standard.bool(forKey: "audioEnabled") {
-        didSet {
-            UserDefaults.standard.set(audioEnabled, forKey: "audioEnabled")
-            audio.setEnabled(audioEnabled)
-        }
+    /// Whether the camera's microphone is played back. The store decides: the user's mute
+    /// switch, and never in the grid.
+    @Published var audioEnabled = true {
+        didSet { audio.setEnabled(audioEnabled) }
     }
+    /// True between `start()` and `stop()`, whether or not the connection is up.
+    private(set) var isStarted = false
     /// Set REOLINK_DEBUG=1 to log connection and decoding progress to stderr.
     private let debug = ProcessInfo.processInfo.environment["REOLINK_DEBUG"] != nil
 
@@ -45,20 +51,28 @@ final class CameraSession: ObservableObject {
 
     var isLive: Bool { state == .live }
 
+    init(settings: CameraSettings) {
+        self.settings = settings
+    }
+
     // MARK: Lifecycle
 
     /// (Re)starts the connection loop with the current settings.
     func start() {
         stop()
+        isStarted = true
         guard settings.isComplete else {
             state = .idle
-            statusText = "Enter the camera address and password in Settings (⌘,)"
+            statusText = "Enter the camera address and username in Settings (⌘,)"
             return
         }
         runTask = Task { await run() }
     }
 
     func stop() {
+        isStarted = false
+        spotlightRefresh?.cancel()
+        spotlightRefresh = nil
         audio.reset()
         runTask?.cancel()
         runTask = nil
@@ -76,10 +90,10 @@ final class CameraSession: ObservableObject {
         fps = 0
     }
 
+    /// Takes new settings; reconnects if the session is running.
     func applySettings(_ s: CameraSettings) {
         settings = s
-        SettingsStore.save(s)
-        start()
+        if isStarted { start() }
     }
 
     private func run() async {
@@ -87,7 +101,8 @@ final class CameraSession: ObservableObject {
         while !Task.isCancelled {
             let cfg = settings
             let camera = BaichuanCamera(host: cfg.host, port: cfg.port, username: cfg.username, password: cfg.password)
-            if debug { await camera.setLog { NSLog("camera: %@", $0) } }
+            let name = cfg.displayName
+            if debug { await camera.setLog { NSLog("[%@] camera: %@", name, $0) } }
             self.camera = camera
             state = .connecting
             statusText = "Connecting to \(cfg.host)…"
@@ -95,21 +110,33 @@ final class CameraSession: ObservableObject {
                 let info = try await camera.connect()
                 let enc = await camera.encryption?.name ?? ""
                 deviceSummary = [info["type"], info["resolution.resolutionName"], enc].compactMap { $0 }.joined(separator: " · ")
+                supportsPTZ = info["ptzMode"] != "none"
                 backoff = 1
-                startPTZQueue(camera)
+                if supportsPTZ { startPTZQueue(camera) }
                 infrared = try? await camera.getLEDState().infrared
+                hasSpotlight = await camera.hasSpotlight()
+                if hasSpotlight {
+                    spotlight = await camera.spotlightState ?? false
+                    await camera.setSpotlightHandler { [weak self] on in
+                        Task { @MainActor in self?.spotlightReported(on) }
+                    }
+                }
                 dayNight = try? await camera.getDayNightMode()
-                if debug { NSLog("infrared: %@, day/night: %@", infrared?.rawValue ?? "unknown", dayNight?.rawValue ?? "unknown") }
+                if debug { NSLog("[%@] infrared: %@, day/night: %@", cfg.displayName, infrared?.rawValue ?? "unknown", dayNight?.rawValue ?? "unknown") }
                 try await streamLoop(camera)
             } catch {
                 if Task.isCancelled { break }
-                if debug { NSLog("session error: %@", "\(error)") }
+                if debug { NSLog("[%@] session error: %@", cfg.displayName, "\(error)") }
                 state = .error("\(error)")
                 statusText = "\(error)"
                 fps = 0
             }
             await camera.disconnect()
             infrared = nil
+            hasSpotlight = false
+            spotlight = false
+            spotlightRefresh?.cancel()
+            spotlightRefresh = nil
             dayNight = nil
             if Task.isCancelled { break }
             statusText += " · retrying in \(Int(backoff)) s"
@@ -130,6 +157,7 @@ final class CameraSession: ObservableObject {
             let audio = self.audio
             audio.setEnabled(audioEnabled)
             let debug = self.debug
+            let name = settings.displayName
             let consumer = Task.detached(priority: .userInitiated) {
                 renderer.reset()
                 audio.reset()
@@ -148,7 +176,7 @@ final class CameraSession: ObservableObject {
                         let size = renderer.frameSize
                         lastReport = now
                         framesAtReport = count
-                        if debug { NSLog("video: %.1f fps, %@ · %@", fps, renderer.statusDescription, audio.statusDescription) }
+                        if debug { NSLog("[%@] video: %.1f fps, %@ · %@", name, fps, renderer.statusDescription, audio.statusDescription) }
                         await MainActor.run { self.fps = fps; self.frameSize = size }
                     }
                 }
@@ -191,6 +219,50 @@ final class CameraSession: ObservableObject {
         }
     }
 
+    // MARK: Spotlight
+
+    /// How long each "on" command holds, and how often it is renewed while the switch is on.
+    private static let spotlightHold: UInt16 = 180
+    private static let spotlightRenewal: Duration = .seconds(120)
+    private var spotlightRefresh: Task<Void, Never>?
+
+    /// The camera only keeps a manual "on" for a while, so the session renews it until the
+    /// user switches the light off (or leaves this camera).
+    func setSpotlight(_ on: Bool) {
+        guard let camera, hasSpotlight, on != spotlight else { return }
+        spotlight = on
+        spotlightRefresh?.cancel()
+        spotlightRefresh = nil
+        Task { [weak self] in
+            do {
+                try await camera.setSpotlight(on, duration: Self.spotlightHold)
+            } catch {
+                self?.spotlight = !on
+                self?.statusText = "Spotlight: \(error)"
+                return
+            }
+            guard let self, on, self.spotlight else { return }
+            self.spotlightRefresh?.cancel()
+            self.spotlightRefresh = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: Self.spotlightRenewal)
+                    guard !Task.isCancelled, let self, self.spotlight else { return }
+                    try? await camera.setSpotlight(true, duration: Self.spotlightHold)
+                }
+            }
+        }
+    }
+
+    /// The camera's own report. "Off" while the switch is on means someone else turned it
+    /// off (the renewal keeps a manual "on" from running out), so the switch follows.
+    private func spotlightReported(_ on: Bool) {
+        if !on {
+            spotlightRefresh?.cancel()
+            spotlightRefresh = nil
+        }
+        spotlight = on
+    }
+
     func setDayNight(_ mode: DayNightMode) {
         guard let camera, mode != dayNight else { return }
         let previous = dayNight
@@ -224,7 +296,7 @@ final class CameraSession: ObservableObject {
     }
 
     func ptzStart(_ direction: PTZDirection) {
-        guard direction != .stop, activePTZ != direction else { return }
+        guard supportsPTZ, direction != .stop, activePTZ != direction else { return }
         activePTZ = direction
         ptzContinuation?.yield(direction)
     }

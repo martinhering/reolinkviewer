@@ -1,6 +1,6 @@
 # Reolink Viewer
 
-A native macOS app for watching and steering a Reolink E1 pan-tilt camera, together with
+A native macOS app for watching and steering Reolink E1 pan-tilt cameras, together with
 the Swift library and command-line tool it is built on.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -15,11 +15,14 @@ commands while you hold an arrow button or key.
 ## Features
 
 - Live view of the main ("Clear") or sub ("Fluent") stream, decoded in hardware
+- Any number of cameras: switch between them with ⌘1 … ⌘9, or watch them all at once in a grid
 - Pan and tilt with on-screen buttons or the arrow keys, for as long as you hold them
+  (the pad is hidden for fixed cameras, which report `ptzMode = none`)
 - Sound from the camera's microphone, in step with the picture, with a mute toggle
 - Night-vision controls (Day & Night mode and the infrared illuminator), as in the Reolink app
+- A switch for the white spotlight on cameras that have one
 - Automatic reconnection when the camera drops the connection or stops sending frames
-- Credentials stay in your login keychain; nothing about your camera is baked into the app
+- Credentials stay in your login keychain; nothing about your cameras is baked into the app
 - `Baichuan`, a pure-Swift package implementing the protocol with no third-party
   dependencies, and `bctool`, a command-line client for scripting and experiments
 
@@ -51,9 +54,18 @@ Alternatively `open Package.swift` in Xcode and run the `ReolinkViewer` scheme. 
 
 ## Usage
 
-On first launch open Settings (⌘,), enter the camera's address, username and password,
-and click Apply. The password goes into your login keychain, the rest into user defaults.
+On first launch open Settings (⌘,), click **+**, enter the camera's name, address, username
+and password, and click Apply. The password goes into your login keychain, the rest into
+user defaults. A camera fresh out of the box, not yet set up in the Reolink app, accepts
+`admin` with an empty password. **Set Password on Camera…** in the camera's settings gives it
+one: the app logs in with the form's current password, changes it on the camera, checks that
+the new one works and stores it in the keychain. The same button changes an existing password. Add as many cameras as you like the same way; drag them to change their order.
 
+- **Cameras:** with more than one camera the toolbar gets a camera menu. The Camera menu in
+  the menu bar lists them too, with ⌘1 … ⌘9 as shortcuts; ⌘] and ⌘[ step to the next and
+  previous one. Only the camera on screen is connected.
+- **All Cameras** (⌘0, also in the camera menu) shows every camera in a grid, on the Fluent
+  stream and muted. Click a tile to open that camera on its own.
 - **Clear / Fluent** in the toolbar switches between the full-resolution main stream and
   the low-resolution sub stream (the same names the Reolink app uses).
 - **Pan and tilt:** hold an arrow button, or an arrow key. The camera moves until you let
@@ -66,8 +78,12 @@ and click Apply. The password goes into your login keychain, the rest into user 
   which decides whether the picture is in colour, and **Infrared LEDs** (Auto / On / Off),
   which controls the illuminator. For a colour picture at night with the LEDs dark, set
   Color and Off; Auto on both gives the camera's default behaviour back.
-- **Reconnect** restarts the connection by hand. The app also does this by itself when
-  the camera drops the connection or stops sending frames.
+- **Spotlight:** cameras with a white spotlight get a light bulb button. The camera keeps a
+  manual "on" for three minutes, so the app renews it for as long as the button is on and the
+  camera is on screen. Switching to another camera lets the light go back to its automatic
+  behaviour within three minutes.
+- **Reconnect** (⌘R) restarts the connection by hand, for every camera on screen. The app
+  also does this by itself when a camera drops the connection or stops sending frames.
 
 ## Command-line tool
 
@@ -84,8 +100,14 @@ export BC_PASSWORD='…'
 .build/debug/bctool switch   --host 192.168.1.20                  # main → sub → main, 3 s each
 .build/debug/bctool ptz      --host 192.168.1.20 --dir left --ms 500
 .build/debug/bctool ir       --host 192.168.1.20 --mode off       # auto | on | off; omit to read
+.build/debug/bctool led      --host 192.168.1.20 --state off      # blue status LED; omit to read
+.build/debug/bctool light    --host 192.168.1.20 --state on       # white spotlight, 180 s; omit to probe
 .build/debug/bctool daynight --host 192.168.1.20 --mode color     # auto | color | bw; omit to read
+.build/debug/bctool users    --host 192.168.1.20                  # list user accounts
+.build/debug/bctool passwd   --host 192.168.1.20 --new 'secret'   # change the password, then log in with it
 ```
+
+For a camera that has no password yet, pass `--password` with no value.
 
 `--verbose` logs every packet. The dumped `.h264` file is a raw Annex B stream that
 `ffprobe` and `ffplay` can read.
@@ -130,8 +152,9 @@ await camera.disconnect()
 
 ## Compatibility
 
-Everything here was developed and verified against a single Reolink E1. Other Reolink
-cameras speak the same protocol and may well work, but have not been tried. If the app or
+Everything here was developed and verified against a Reolink E1, plus a fixed 4512×2512
+H.265 camera (`type = ipc`, `ptzMode = none`) for login, streaming and the camera list.
+Other Reolink cameras speak the same protocol and may well work, but have not been tried. If the app or
 `bctool` works, or fails, with another model, please open an issue with the model name,
 the firmware version and the output of `bctool info`.
 
@@ -173,6 +196,19 @@ it, port it or compare against another camera.
   `InputAdvanceCfg`, about 2 KB of XML); `InputAdvanceCfg/DayNight/mode` is `auto`,
   `color` or `blackAndWhite`. To change it the whole document is sent back with id 25
   and only that element edited, which is what the official client does too.
+- Users: message id 58 with an `Extension` naming `userName` returns a `UserList` of `User`
+  entries (`userName`, `userId`, `userLevel` 1 = administrator, `loginState`). Message id 59
+  sends the whole list back; each entry has `userSetState` `none`, `add`, `delete` or
+  `modify`, and only added or modified entries carry a plain-text `password` (inside the
+  AES session). This follows [Neolink](https://github.com/QuantumEntangledAndy/neolink);
+  reading the list was verified on a fixed Reolink camera.
+- Spotlight: message id 291, a `FloodlightStatusList` of `FloodlightStatus` entries
+  (`channel`, `status` 1/0, `brightness`), arrives unasked right after login and on every
+  change. Message id 438 reads the automatic settings (`FloodlightTask`); the fixed camera
+  tested here refuses it with code 405 but does send 291, so the app shows the button when
+  either one answers. Message id 288 with `FloodlightManual` (`channelId`, `status` 1/0,
+  `duration` in seconds) switches it; the camera confirms with a 291 report. From Neolink,
+  verified on the fixed camera.
 - Message id 4 with the same message number stops the stream; the camera sometimes
   pings with id 234, which is answered with code 200.
 
@@ -200,7 +236,7 @@ boundaries and resync after garbage) and the Day & Night document rewrite.
 ### Debugging
 
 `REOLINK_DEBUG=1` makes the app log connection and decoding progress to stderr, and
-`REOLINK_PASSWORD` overrides the keychain, so a quick check from Terminal is:
+`REOLINK_PASSWORD` overrides the keychain for every camera, so a quick check from Terminal is:
 
 ```sh
 REOLINK_DEBUG=1 REOLINK_PASSWORD='…' .build/debug/ReolinkViewer

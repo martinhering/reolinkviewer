@@ -32,7 +32,10 @@ struct BCTool {
         guard let host = options["host"] else { usage() }
         let port = UInt16(options["port"] ?? "9000") ?? 9000
         let user = options["user"] ?? "admin"
-        guard let password = options["password"] ?? ProcessInfo.processInfo.environment["BC_PASSWORD"] else {
+        // `--password ""` cannot be told from a flag, so `--password` alone also means "empty".
+        let explicitEmpty = flags.contains("password")
+        guard let password = options["password"] ?? ProcessInfo.processInfo.environment["BC_PASSWORD"]
+                ?? (explicitEmpty ? "" : nil) else {
             fail("no password: pass --password or set BC_PASSWORD")
         }
 
@@ -68,6 +71,30 @@ struct BCTool {
                 }
                 let state = try await camera.getLEDState()
                 print("infrared: \(state.infrared.rawValue), status LED: \(state.statusLight ? "on" : "off")")
+            case "led":
+                if let stateText = options["state"] {
+                    guard stateText == "on" || stateText == "off" else { usage() }
+                    try await camera.setStatusLight(stateText == "on")
+                    print("status LED set to \(stateText)")
+                }
+                let state = try await camera.getLEDState()
+                print("status LED: \(state.statusLight ? "on" : "off"), infrared: \(state.infrared.rawValue)")
+            case "light":
+                let probe = await camera.probeSpotlight()
+                let answer = probe.replyCode.map { "code \($0)" } ?? "no reply"
+                print("spotlight settings (message 438): \(answer)")
+                if flags.contains("verbose"), let xml = probe.xml { print(xml) }
+                let present = await camera.hasSpotlight()
+                let state = await camera.spotlightState
+                print("spotlight: \(present ? "present" : "not found")" + (state.map { ", currently \($0 ? "on" : "off")" } ?? ""))
+                await camera.setSpotlightHandler { on in print("camera reports spotlight \(on ? "on" : "off")") }
+                if let stateText = options["state"] {
+                    guard stateText == "on" || stateText == "off" else { usage() }
+                    let seconds = UInt16(options["seconds"] ?? "180") ?? 180
+                    try await camera.setSpotlight(stateText == "on", duration: seconds)
+                    print("spotlight switched \(stateText)" + (stateText == "on" ? " for \(seconds) s" : ""))
+                }
+                try await Task.sleep(for: .seconds(2))  // let the camera report the change
             case "daynight":
                 if let modeText = options["mode"] {
                     let mode: DayNightMode
@@ -81,6 +108,24 @@ struct BCTool {
                     print("day/night set to \(mode.rawValue)")
                 }
                 print("day/night: \(try await camera.getDayNightMode().rawValue)")
+            case "users":
+                for u in try await camera.getUsers() {
+                    print("  \(u.userName)  \(u.isAdministrator ? "administrator" : "user")"
+                          + (u.userId.map { "  id=\($0)" } ?? "") + (u.loginState == 1 ? "  (this session)" : ""))
+                }
+            case "passwd":
+                guard let newPassword = options["new"] ?? ProcessInfo.processInfo.environment["BC_NEW_PASSWORD"],
+                      !newPassword.isEmpty else {
+                    fail("no new password: pass --new or set BC_NEW_PASSWORD")
+                }
+                let target = options["for"] ?? user
+                try await camera.changePassword(to: newPassword, for: target)
+                print("password of \(target) changed")
+                await camera.disconnect()
+                let check = BaichuanCamera(host: host, port: port, username: target, password: newPassword)
+                try await check.connect()
+                await check.disconnect()
+                print("login with the new password works")
             case "switch":
                 for kind in [StreamKind.main, .sub, .main] {
                     try await streamCommand(camera: camera, kind: kind, seconds: 3, out: nil)
@@ -170,9 +215,14 @@ struct BCTool {
           bctool stream --host H [--sub] [--seconds 10] [--out file.h264] [--audio-out file.aac]
           bctool switch --host H          (main → sub → main, 3 s each)
           bctool ir     --host H [--mode auto|on|off]        (infrared LEDs)
+          bctool led    --host H [--state on|off]            (blue status LED)
+          bctool light  --host H [--state on|off] [--seconds 180]   (white spotlight, if present)
           bctool daynight --host H [--mode auto|color|bw]    (colour vs. monochrome picture)
           bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
-        password: --password or BC_PASSWORD
+          bctool users  --host H                             (list user accounts)
+          bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)
+        password: --password or BC_PASSWORD (may be empty for a camera not yet set up)
+        new password: --new or BC_NEW_PASSWORD
         """)
         exit(2)
     }

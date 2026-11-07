@@ -9,10 +9,20 @@ public enum BCMsgID {
     public static let ptzControl: UInt32 = 18
     public static let setISP: UInt32 = 25
     public static let getISP: UInt32 = 26
+    /// Returns the user list (and, on some firmware, more system information).
+    public static let getUsers: UInt32 = 58
+    /// Adds, modifies or deletes users; the whole list is sent each time.
+    public static let updateUserList: UInt32 = 59
     public static let ping: UInt32 = 93
     public static let getLEDState: UInt32 = 208
     public static let setLEDState: UInt32 = 209
     public static let udpKeepAlive: UInt32 = 234
+    /// Switches the white spotlight on or off for a while.
+    public static let floodlightManual: UInt32 = 288
+    /// Sent by the camera whenever the spotlight goes on or off.
+    public static let floodlightStatusList: UInt32 = 291
+    /// Reads the spotlight's automatic settings; only cameras with a spotlight answer with 200.
+    public static let floodlightTasksRead: UInt32 = 438
 }
 
 /// A decoded (or to-be-encoded) Baichuan message.
