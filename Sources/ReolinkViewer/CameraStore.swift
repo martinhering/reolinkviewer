@@ -26,7 +26,7 @@ final class CameraStore: ObservableObject {
             reconcile()
         }
     }
-    /// Stream shown in the single-camera view. The grid always uses the sub stream.
+    /// Stream shown in both the single-camera view and the grid.
     @Published var streamKind: StreamKind = .main {
         didSet { if oldValue != streamKind { reconcile() } }
     }
@@ -36,6 +36,12 @@ final class CameraStore: ObservableObject {
             defaults.set(audioEnabled, forKey: "audioEnabled")
             reconcile()
         }
+    }
+
+    /// The one camera heard in the grid, if any. The others stay muted so they do not talk
+    /// over each other. Not persisted.
+    @Published var gridAudioID: UUID? {
+        didSet { if oldValue != gridAudioID { reconcile() } }
     }
 
     private let defaults = UserDefaults.standard
@@ -119,16 +125,16 @@ final class CameraStore: ObservableObject {
         show(cameras[(index + offset + cameras.count) % cameras.count].id)
     }
 
-    /// Runs exactly the sessions the layout shows: all of them in the grid (sub stream, muted),
-    /// otherwise only the selected one with the chosen stream and the mute switch.
+    /// Runs exactly the sessions the layout shows, all with the chosen stream: every camera in
+    /// the grid (only `gridAudioID` audible), otherwise only the selected one (with the mute switch).
     private func reconcile() {
         guard started else { return }
         let grid = showsGrid
         for camera in cameras {
             guard let session = sessions[camera.id] else { continue }
             if grid || camera.id == selectedID {
-                session.streamKind = grid ? .sub : streamKind
-                session.audioEnabled = audioEnabled && !grid
+                session.streamKind = streamKind
+                session.audioEnabled = grid ? camera.id == gridAudioID : audioEnabled
                 if !session.isStarted { session.start() }
             } else if session.isStarted {
                 session.stop()

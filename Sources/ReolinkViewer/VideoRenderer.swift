@@ -34,6 +34,8 @@ enum AnnexB {
 /// Used from one decoding task at a time; `layer` is handed to the view on the main thread.
 final class VideoRenderer: @unchecked Sendable {
     let layer = AVSampleBufferDisplayLayer()
+    /// The view currently showing `layer`. Main thread only; see `VideoHostView`.
+    weak var host: VideoHostView?
     private var renderer: AVSampleBufferVideoRenderer { layer.sampleBufferRenderer }
 
     private var codec: VideoCodec?

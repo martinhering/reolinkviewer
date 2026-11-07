@@ -19,6 +19,9 @@ struct ContentView: View {
         .background(Color.black)
         .frame(minWidth: 640, minHeight: 360)
         .navigationTitle(title)
+        // The camera dropdown already names what is shown; the window keeps its title for the
+        // Window menu and Mission Control.
+        .background(WindowTitleVisibility(visible: store.cameras.count < 2))
         .onAppear { store.start() }
         .toolbar {
             if store.cameras.count > 1 {
@@ -32,16 +35,29 @@ struct ContentView: View {
                     }
                     .help("Choose the camera to view (⌘1 … ⌘9), or show all of them (⌘0)")
                 }
+                ToolbarItem(placement: .navigation) {
+                    Picker("View", selection: $store.layout) {
+                        Label("Single Camera", systemImage: "rectangle").tag(CameraStore.Layout.single)
+                        Label("Grid", systemImage: "square.grid.2x2").tag(CameraStore.Layout.grid)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelStyle(.iconOnly)
+                    .help("Show one camera, or all cameras in a grid (⌘0)")
+                }
             }
-            if !store.showsGrid, let session = store.selectedSession {
+            if !store.cameras.isEmpty {
                 ToolbarItem(placement: .principal) {
                     Picker("Stream", selection: $store.streamKind) {
                         Text("Clear").tag(StreamKind.main)
                         Text("Fluent").tag(StreamKind.sub)
                     }
                     .pickerStyle(.segmented)
-                    .help("Clear: full resolution main stream. Fluent: low-resolution sub stream.")
+                    .help(store.showsGrid
+                          ? "Clear: every camera in full resolution. Fluent: low-resolution sub streams, lighter on the network and the Mac."
+                          : "Clear: full resolution main stream. Fluent: low-resolution sub stream.")
                 }
+            }
+            if !store.showsGrid, let session = store.selectedSession {
                 ToolbarItem {
                     Button {
                         store.audioEnabled.toggle()
@@ -99,15 +115,36 @@ struct ContentView: View {
     }
 }
 
+/// Shows or hides the title in the window's toolbar without clearing the title itself.
+struct WindowTitleVisibility: NSViewRepresentable {
+    let visible: Bool
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let visibility: NSWindow.TitleVisibility = visible ? .visible : .hidden
+        // The view joins its window after the first update; apply once it is there.
+        DispatchQueue.main.async {
+            if let window = nsView.window, window.titleVisibility != visibility {
+                window.titleVisibility = visibility
+            }
+        }
+    }
+}
+
 /// Switches the white spotlight. Shown only for cameras that have one.
 struct SpotlightButton: View {
     @ObservedObject var session: CameraSession
+    /// Grid tile size: a plain icon instead of a toolbar toggle.
+    var compact = false
 
     var body: some View {
         if session.hasSpotlight {
             Toggle(isOn: Binding(get: { session.spotlight }, set: { session.setSpotlight($0) })) {
                 Label(session.spotlight ? "Spotlight off" : "Spotlight on",
                       systemImage: session.spotlight ? "lightbulb.fill" : "lightbulb")
+                    .frame(width: compact ? 22 : nil, height: compact ? 22 : nil)
+                    .foregroundStyle(compact && session.spotlight ? Color.accentColor : Color.primary)
             }
             .toggleStyle(.button)
             .help(session.spotlight ? "The spotlight is on; click to switch it off"
@@ -120,6 +157,8 @@ struct SpotlightButton: View {
 /// session's published state.
 struct NightVisionMenu: View {
     @ObservedObject var session: CameraSession
+    /// Grid tile size: a plain icon instead of a toolbar menu.
+    var compact = false
 
     var body: some View {
         Menu {
@@ -141,6 +180,7 @@ struct NightVisionMenu: View {
             }
         } label: {
             Label("Night vision", systemImage: nightVisionSymbol)
+                .frame(width: compact ? 22 : nil, height: compact ? 22 : nil)
         }
         .disabled(session.infrared == nil && session.dayNight == nil)
         .help("Picture: \(session.dayNight?.label ?? "unknown") · Infrared LEDs: \(session.infrared?.label ?? "unknown")")
@@ -292,7 +332,7 @@ struct SingleCameraView: View {
     }
 }
 
-/// Every camera at once, on the sub stream and muted. Clicking a tile opens that camera.
+/// Every camera at once, on the chosen stream and muted. Clicking a tile opens that camera.
 struct CameraGridView: View {
     @EnvironmentObject private var store: CameraStore
     private let spacing: CGFloat = 4
@@ -311,7 +351,10 @@ struct CameraGridView: View {
                     HStack(spacing: spacing) {
                         ForEach(store.cameras.dropFirst(row * columns).prefix(columns)) { camera in
                             if let session = store.session(for: camera) {
-                                CameraTile(session: session, name: camera.displayName) { store.show(camera.id) }
+                                CameraTile(session: session, name: camera.displayName,
+                                           audible: store.gridAudioID == camera.id,
+                                           onToggleAudio: { store.gridAudioID = store.gridAudioID == camera.id ? nil : camera.id },
+                                           onSelect: { store.show(camera.id) })
                                     .frame(width: width, height: height)
                             }
                         }
@@ -326,11 +369,13 @@ struct CameraGridView: View {
 struct CameraTile: View {
     @ObservedObject var session: CameraSession
     let name: String
+    let audible: Bool
+    let onToggleAudio: () -> Void
     let onSelect: () -> Void
 
     var body: some View {
         ZStack {
-            VideoView(renderer: session.renderer)
+            VideoView(renderer: session.renderer, gravity: .resizeAspectFill)
             if !session.isLive {
                 VStack(spacing: 8) {
                     if session.state == .connecting {
@@ -344,24 +389,48 @@ struct CameraTile: View {
                 .padding(16)
             }
             VStack {
-                HStack(spacing: 6) {
-                    Circle().fill(session.isLive ? Color.green : Color.orange).frame(width: 8, height: 8)
-                    Text(name).lineLimit(1)
+                HStack(alignment: .top) {
+                    HStack(spacing: 6) {
+                        Circle().fill(session.isLive ? Color.green : Color.orange).frame(width: 8, height: 8)
+                        Text(name).lineLimit(1)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                    Spacer()
+                    controls
                 }
-                .font(.callout)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
                 Spacer()
             }
         }
         .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        // No rounded corners: SwiftUI cannot reliably clip the AppKit video layer, so some
+        // tiles would be rounded and others not. The gap between tiles separates them.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .help("Click to view \(name) on its own")
+    }
+
+    /// The same controls as the single view's toolbar, over the picture's top right corner.
+    private var controls: some View {
+        HStack(spacing: 2) {
+            Button(action: onToggleAudio) {
+                Image(systemName: audible ? "speaker.wave.2" : "speaker.slash")
+                    .frame(width: 22, height: 22)
+            }
+            .help(audible ? "Listening to \(name); click to mute" : "Hear \(name) (mutes the other cameras)")
+            SpotlightButton(session: session, compact: true)
+            NightVisionMenu(session: session, compact: true)
+        }
+        .buttonStyle(.borderless)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .labelStyle(.iconOnly)
+        .font(.body)
+        .padding(4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

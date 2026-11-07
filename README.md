@@ -64,10 +64,13 @@ the new one works and stores it in the keychain. The same button changes an exis
 - **Cameras:** with more than one camera the toolbar gets a camera menu. The Camera menu in
   the menu bar lists them too, with ⌘1 … ⌘9 as shortcuts; ⌘] and ⌘[ step to the next and
   previous one. Only the camera on screen is connected.
-- **All Cameras** (⌘0, also in the camera menu) shows every camera in a grid, on the Fluent
-  stream and muted. Click a tile to open that camera on its own.
+- **Grid:** the single/grid switch next to the camera menu, ⌘0 or **All Cameras** in the
+  camera menu shows every camera in a grid. Each tile carries the speaker, spotlight and
+  night-vision controls in its top right corner; the speaker picks the one camera you hear.
+  Click anywhere else on a tile to open that camera on its own.
 - **Clear / Fluent** in the toolbar switches between the full-resolution main stream and
-  the low-resolution sub stream (the same names the Reolink app uses).
+  the low-resolution sub stream (the same names the Reolink app uses), in the single view and
+  the grid alike. Fluent is lighter on the network and the Mac when the grid holds many cameras.
 - **Pan and tilt:** hold an arrow button, or an arrow key. The camera moves until you let
   go. Drag the grip in the middle of the pad to put the controls wherever you like over
   the picture; the position is remembered, and the grip's context menu resets it.

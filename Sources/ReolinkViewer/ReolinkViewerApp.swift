@@ -11,6 +11,8 @@ struct ReolinkViewerApp: App {
         }
         .defaultSize(width: 1120, height: 660)
         .windowResizability(.contentMinSize)
+        // Left to macOS the toolbar starts compact and grows when the items change; keep it big.
+        .windowToolbarStyle(.unified)
         .commands {
             CameraCommands(store: store)
         }
