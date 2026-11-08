@@ -21,6 +21,7 @@ commands while you hold an arrow button or key.
 - Sound from the camera's microphone, in step with the picture, with a mute toggle
 - Night-vision controls (Day & Night mode and the infrared illuminator), as in the Reolink app
 - A switch for the white spotlight on cameras that have one
+- Switches for the camera's network services (ONVIF, RTSP, RTMP, HTTP, HTTPS) in Settings
 - Automatic reconnection when the camera drops the connection or stops sending frames
 - Credentials stay in your login keychain; nothing about your cameras is baked into the app
 - `Baichuan`, a pure-Swift package implementing the protocol with no third-party
@@ -61,6 +62,9 @@ picture too, in place of the factory name. A camera fresh out of the box, not ye
 `admin` with an empty password. **Set Password on Camera…** in the camera's settings gives it
 one: the app logs in with the form's current password, changes it on the camera, checks that
 the new one works and stores it in the keychain. The same button changes an existing password. Add as many cameras as you like the same way; drag them to change their order.
+**Network services** at the bottom of a camera's settings has a switch for each protocol the
+camera can offer besides its own (HTTP, HTTPS, RTSP, RTMP, ONVIF) with its port; flipping one
+is written to the camera at once.
 
 - **Cameras:** with more than one camera the toolbar gets a camera menu. The Camera menu in
   the menu bar lists them too, with ⌘1 … ⌘9 as shortcuts; ⌘] and ⌘[ step to the next and
@@ -108,6 +112,7 @@ export BC_PASSWORD='…'
 .build/debug/bctool light    --host 192.168.1.20 --state on       # white spotlight, 180 s; omit to probe
 .build/debug/bctool daynight --host 192.168.1.20 --mode color     # auto | color | bw; omit to read
 .build/debug/bctool osd      --host 192.168.1.20 --name 'Garden'  # name shown in the picture; omit to read
+.build/debug/bctool services --host 192.168.1.20 --onvif on       # also --rtsp/--rtmp/--http/--https; omit to read
 .build/debug/bctool users    --host 192.168.1.20                  # list user accounts
 .build/debug/bctool passwd   --host 192.168.1.20 --new 'secret'   # change the password, then log in with it
 ```
@@ -205,6 +210,11 @@ it, port it or compare against another camera.
   `enable`, position) and `OsdFlowData`; id 45 takes the same document back with the name
   changed, the way Day & Night is written. Reading follows reolink_aio; the write (verified
   on the fixed camera) is the get/set pairing the other settings use.
+- Network services: message id 37 (no body) returns the port configuration: `ServerPort`
+  (the camera's own Baichuan port, 9000) and `HttpPort`, `HttpsPort`, `RtspPort`, `RtmpPort`,
+  `OnvifPort`, each with its port number (`onvifPort` …) and an `enable` switch; id 36 takes
+  the document back with one `enable` changed, the way the other settings are written.
+  Message ids as in Neolink and reolink_aio; the document layout is what an RLC-1240A sends.
 - Users: message id 58 with an `Extension` naming `userName` returns a `UserList` of `User`
   entries (`userName`, `userId`, `userLevel` 1 = administrator, `loginState`). Message id 59
   sends the whole list back; each entry has `userSetState` `none`, `add`, `delete` or

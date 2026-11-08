@@ -38,7 +38,7 @@ struct SettingsView: View {
             }
             .padding(12)
         }
-        .frame(width: 640, height: 420)
+        .frame(width: 640, height: 680)
         .onAppear {
             if !loaded {
                 draft = store.cameras
@@ -128,6 +128,10 @@ struct CameraForm: View {
     @State private var writingName = false
     @State private var nameResult: String?
     @State private var nameResultIsError = false
+    /// What the camera last told us about its network services; nil until read.
+    @State private var services: [CameraService: CameraServiceState]?
+    @State private var servicesBusy = false
+    @State private var servicesError: String?
 
     var body: some View {
         Form {
@@ -140,7 +144,7 @@ struct CameraForm: View {
                         .help("Make the camera show this name in its picture (the on-screen display)")
                 }
                 if let nameResult {
-                    Text(nameResult).font(.caption).foregroundStyle(nameResultIsError ? .red : .secondary)
+                    Text(nameResult).font(.caption).foregroundStyle(nameResultIsError ? .red : .secondary).textSelection(.enabled)
                 }
                 TextField("Address", text: $camera.host, prompt: Text("192.168.1.20"))
                 TextField("Port", value: $camera.port, format: .number.grouping(.never), prompt: Text("9000"))
@@ -162,9 +166,50 @@ struct CameraForm: View {
                 }
                 Text("32 is what the Reolink app uses.").font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                ForEach(CameraService.allCases) { service in
+                    Toggle(isOn: Binding(
+                        get: { services?[service]?.enabled ?? false },
+                        set: { setService(service, enabled: $0) })) {
+                        HStack {
+                            Text(service.displayName)
+                            Spacer()
+                            if let port = services?[service]?.port {
+                                Text("port \(port)").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                            }
+                        }
+                    }
+                    .disabled(servicesBusy || services?[service] == nil)
+                    .help(service.purpose)
+                }
+                Text(servicesStatus).font(.caption).foregroundStyle(servicesError == nil ? Color.secondary : Color.red).textSelection(.enabled)
+            } header: {
+                HStack {
+                    Text("Network services")
+                    Spacer()
+                    if servicesBusy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button {
+                            readServices()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(!canReachCamera)
+                        .help("Read the current state from the camera")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
-        .onChange(of: camera.id) { _, _ in nameResult = nil }
+        .onAppear { readServices() }
+        .onChange(of: camera.id) { _, _ in
+            nameResult = nil
+            services = nil
+            servicesError = nil
+            readServices()
+        }
         .sheet(isPresented: $changingPassword) {
             ChangePasswordSheet(camera: camera) { newPassword in
                 changingPassword = false
@@ -177,6 +222,69 @@ struct CameraForm: View {
 }
 
 extension CameraForm {
+    /// Address and username are filled in, so the camera can be asked something.
+    fileprivate var canReachCamera: Bool {
+        !camera.host.trimmingCharacters(in: .whitespaces).isEmpty && !camera.username.isEmpty
+    }
+
+    /// The form's camera with the address trimmed, ready for a connection.
+    fileprivate var target: CameraSettings {
+        var target = camera
+        target.host = target.host.trimmingCharacters(in: .whitespaces)
+        return target
+    }
+
+    fileprivate var servicesStatus: String {
+        if let servicesError { return servicesError }
+        if servicesBusy { return services == nil ? "Asking the camera…" : "Writing to the camera…" }
+        guard let services else {
+            return canReachCamera ? "Not read yet." : "Enter the address and username to read this from the camera."
+        }
+        let missing = CameraService.allCases.filter { services[$0] == nil }
+        let on = CameraService.allCases.filter { services[$0]?.enabled == true }.map(\.displayName)
+        var text = on.isEmpty ? "Every service is off; only the app's own connection is open." : "Switched on: \(on.joined(separator: ", ")). Changes take effect on the camera at once."
+        if !missing.isEmpty { text += " This camera does not report \(missing.map(\.displayName).joined(separator: ", "))." }
+        return text
+    }
+
+    /// Reads the network services from the camera, with the form's current credentials.
+    fileprivate func readServices() {
+        guard canReachCamera, !servicesBusy else { return }
+        let id = camera.id
+        servicesBusy = true
+        servicesError = nil
+        Task {
+            do {
+                let result = try await store.readServices(from: target)
+                if camera.id == id { services = result }
+            } catch {
+                if camera.id == id { servicesError = "Could not read the camera's services: \(error)" }
+            }
+            if camera.id == id { servicesBusy = false }
+        }
+    }
+
+    /// Switches `service` on the camera and shows what the camera reports afterwards.
+    fileprivate func setService(_ service: CameraService, enabled: Bool) {
+        guard canReachCamera, !servicesBusy else { return }
+        let id = camera.id
+        servicesBusy = true
+        servicesError = nil
+        Task {
+            do {
+                let result = try await store.setService(service, enabled: enabled, on: target)
+                guard camera.id == id else { return }
+                services = result
+                if result[service]?.enabled != enabled {
+                    servicesError = "The camera accepted the change but still reports \(service.displayName) \(enabled ? "off" : "on")."
+                }
+            } catch {
+                if camera.id == id { servicesError = "Could not switch \(service.displayName) \(enabled ? "on" : "off"): \(error)" }
+            }
+            if camera.id == id { servicesBusy = false }
+        }
+    }
+
     /// Writes the form's name into the camera's picture, with the form's current credentials.
     fileprivate func writeName() {
         var target = camera

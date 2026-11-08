@@ -117,6 +117,23 @@ final class CameraStore: ObservableObject {
         try await client.setOSDName(name)
     }
 
+    /// Asks the camera which network services (ONVIF, RTSP, …) are switched on.
+    func readServices(from camera: CameraSettings) async throws -> [CameraService: CameraServiceState] {
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        try await client.connect()
+        defer { Task { await client.disconnect() } }
+        return try await client.getServices()
+    }
+
+    /// Switches one of the camera's network services on or off and returns the new state of all of them.
+    func setService(_ service: CameraService, enabled: Bool, on camera: CameraSettings) async throws -> [CameraService: CameraServiceState] {
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        try await client.connect()
+        defer { Task { await client.disconnect() } }
+        try await client.setService(service, enabled: enabled)
+        return try await client.getServices()
+    }
+
     // MARK: Selection
 
     /// Shows `id` on its own, leaving the grid if needed.

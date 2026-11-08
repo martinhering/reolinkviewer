@@ -80,6 +80,34 @@ public struct DeviceInfo: Sendable {
     }
 }
 
+/// A network service the camera can offer besides its own protocol.
+public enum CameraService: String, CaseIterable, Sendable, Identifiable {
+    case http, https, rtsp, rtmp, onvif
+    public var id: String { rawValue }
+    public var displayName: String { rawValue == "onvif" ? "ONVIF" : rawValue.uppercased() }
+
+    /// What switching the service on gets you, for tooltips.
+    public var purpose: String {
+        switch self {
+        case .http: return "The camera's web interface and HTTP API, unencrypted"
+        case .https: return "The camera's web interface and HTTP API over TLS"
+        case .rtsp: return "Let players such as VLC or an NVR pull the video stream over RTSP"
+        case .rtmp: return "Let streaming software pull the video over RTMP"
+        case .onvif: return "Let other software (Home Assistant, Synology, …) find and stream this camera over ONVIF"
+        }
+    }
+}
+
+/// Whether one of the camera's network services is switched on, and on which port.
+public struct CameraServiceState: Sendable, Equatable {
+    public var enabled: Bool
+    public var port: Int?
+    public init(enabled: Bool, port: Int? = nil) {
+        self.enabled = enabled
+        self.port = port
+    }
+}
+
 /// One entry of the camera's user list.
 public struct CameraUser: Sendable, Equatable {
     /// What message 59 should do with this entry.
@@ -434,6 +462,50 @@ public actor BaichuanCamera {
         }
     }
 
+    // MARK: Network services (ServerPort configuration)
+
+    /// The camera's port configuration XML: `ServerPort` (its own Baichuan port) plus `HttpPort`,
+    /// `HttpsPort`, `RtspPort`, `RtmpPort` and `OnvifPort`, each with a port number and an `enable` switch.
+    public func getServerPortsXML() async throws -> String {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.getServerPorts, channelId: channelId, msgNum: num))
+        let reply = try await sub.next(timeout: 5)
+        guard reply.responseCode == 200, let xml = reply.xml, let end = xml.lastIndex(of: ">") else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "expected port configuration")
+        }
+        return String(xml[...end])
+    }
+
+    /// The state of every network service the camera reports.
+    public func getServices() async throws -> [CameraService: CameraServiceState] {
+        let xml = try await getServerPortsXML()
+        let services = try ServerPortConfig.services(in: xml)
+        guard !services.isEmpty else {
+            throw BCError.malformedXML("no service ports in the reply to message 37; the camera sent: \(xml.prefix(600))")
+        }
+        return services
+    }
+
+    /// Reads the port configuration, flips only `service`'s `enable`, and writes it back.
+    public func setService(_ service: CameraService, enabled: Bool) async throws {
+        let xml = try await getServerPortsXML()
+        guard let updated = ServerPortConfig.replacingEnabled(of: service, in: xml, with: enabled) else {
+            throw BCError.malformedXML("no \(ServerPortConfig.element(for: service)) element in the port configuration")
+        }
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.setServerPorts, channelId: channelId, msgNum: num, payload: .xml(updated)))
+        guard let reply = try? await sub.next(timeout: 2) else { return }
+        guard reply.responseCode == 200 else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "port configuration rejected")
+        }
+    }
+
     // MARK: Day & Night (ISP configuration)
 
     /// The camera's full ISP configuration XML (VideoInput + InputAdvanceCfg).
@@ -641,6 +713,38 @@ enum OSDConfig {
     /// untouched, so the configuration goes back exactly as the camera produced it.
     static func replacingName(in xml: String, with name: String) -> String? {
         nameRange(in: xml).map { xml.replacingCharacters(in: $0, with: BCXML.escape(name)) }
+    }
+}
+
+enum ServerPortConfig {
+    /// The element holding one service: `<OnvifPort version="1.1"><onvifPort>8000</onvifPort><enable>0</enable></OnvifPort>`.
+    static func element(for service: CameraService) -> String {
+        service.rawValue.prefix(1).uppercased() + service.rawValue.dropFirst() + "Port"
+    }
+
+    /// Every service the document has an element for. (`ServerPort` itself is the camera's own
+    /// Baichuan port and is left alone.)
+    static func services(in xml: String) throws -> [CameraService: CameraServiceState] {
+        let reader = try XMLReader(xml)
+        var out: [CameraService: CameraServiceState] = [:]
+        for service in CameraService.allCases {
+            let element = element(for: service)
+            guard let enable = reader.int("/body/\(element)/enable") else { continue }
+            out[service] = CameraServiceState(enabled: enable != 0, port: reader.int("/body/\(element)/\(service.rawValue)Port"))
+        }
+        return out
+    }
+
+    /// Replaces the text of the service element's `<enable>` and leaves every other byte
+    /// untouched, so the configuration goes back exactly as the camera produced it.
+    static func replacingEnabled(of service: CameraService, in xml: String, with enabled: Bool) -> String? {
+        // The element carries a version attribute: <OnvifPort version="1.1">.
+        let element = element(for: service)
+        guard let start = xml.range(of: "<\(element)"),
+              let end = xml.range(of: "</\(element)>", range: start.upperBound..<xml.endIndex),
+              let valueStart = xml.range(of: "<enable>", range: start.upperBound..<end.lowerBound),
+              let valueEnd = xml.range(of: "</enable>", range: valueStart.upperBound..<end.lowerBound) else { return nil }
+        return xml.replacingCharacters(in: valueStart.upperBound..<valueEnd.lowerBound, with: enabled ? "1" : "0")
     }
 }
 

@@ -366,3 +366,57 @@ final class OSDConfigTests: XCTestCase {
         XCTAssertNil(OSDConfig.replacingName(in: "<body/>", with: "x"))
     }
 }
+
+final class ServerPortConfigTests: XCTestCase {
+    // As an RLC-1240A answers message 37.
+    let xml = """
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <body>
+    <ServerPort version="1.1">
+    <serverPort>9000</serverPort>
+    <enable>1</enable>
+    </ServerPort>
+    <HttpPort version="1.1">
+    <httpPort>80</httpPort>
+    <enable>0</enable>
+    </HttpPort>
+    <HttpsPort version="1.1">
+    <httpsPort>443</httpsPort>
+    <enable>1</enable>
+    </HttpsPort>
+    <RtspPort version="1.1">
+    <rtspPort>554</rtspPort>
+    <enable>0</enable>
+    </RtspPort>
+    <RtmpPort version="1.1">
+    <rtmpPort>1935</rtmpPort>
+    <enable>0</enable>
+    </RtmpPort>
+    <OnvifPort version="1.1">
+    <onvifPort>8000</onvifPort>
+    <enable>0</enable>
+    </OnvifPort>
+    </body>
+    """
+
+    func testReadsServices() throws {
+        let services = try ServerPortConfig.services(in: xml)
+        XCTAssertEqual(services[.onvif], CameraServiceState(enabled: false, port: 8000))
+        XCTAssertEqual(services[.rtsp], CameraServiceState(enabled: false, port: 554))
+        XCTAssertEqual(services[.https], CameraServiceState(enabled: true, port: 443))
+        XCTAssertEqual(services.count, 5)
+        XCTAssertTrue(try ServerPortConfig.services(in: "<body/>").isEmpty)
+    }
+
+    func testReplacesOnlyOneSwitch() throws {
+        let out = ServerPortConfig.replacingEnabled(of: .onvif, in: xml, with: true)
+        XCTAssertEqual(out, xml.replacingOccurrences(of: "<onvifPort>8000</onvifPort>\n<enable>0</enable>",
+                                                     with: "<onvifPort>8000</onvifPort>\n<enable>1</enable>"))
+        XCTAssertEqual(try ServerPortConfig.services(in: out!)[.onvif], CameraServiceState(enabled: true, port: 8000))
+        // Switching HTTPS off must leave the camera's own ServerPort and the other services as they were.
+        let https = ServerPortConfig.replacingEnabled(of: .https, in: xml, with: false)
+        XCTAssertEqual(https, xml.replacingOccurrences(of: "<httpsPort>443</httpsPort>\n<enable>1</enable>",
+                                                       with: "<httpsPort>443</httpsPort>\n<enable>0</enable>"))
+        XCTAssertNil(ServerPortConfig.replacingEnabled(of: .onvif, in: "<body/>", with: true))
+    }
+}

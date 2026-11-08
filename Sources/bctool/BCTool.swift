@@ -102,6 +102,24 @@ struct BCTool {
                     print("OSD name set to \(name)")
                 }
                 print("OSD name: \(try await camera.getOSDName())")
+            case "services":
+                if flags.contains("verbose") { print(try await camera.getServerPortsXML()) }
+                for service in CameraService.allCases {
+                    guard let state = options[service.rawValue] else { continue }
+                    let enabled: Bool
+                    switch state {
+                    case "on": enabled = true
+                    case "off": enabled = false
+                    default: usage()
+                    }
+                    try await camera.setService(service, enabled: enabled)
+                    print("\(service.displayName) switched \(state)")
+                }
+                let services = try await camera.getServices()
+                for service in CameraService.allCases {
+                    guard let state = services[service] else { continue }
+                    print("  \(service.displayName): \(state.enabled ? "on" : "off")" + (state.port.map { "  port \($0)" } ?? ""))
+                }
             case "daynight":
                 if let modeText = options["mode"] {
                     let mode: DayNightMode
@@ -226,6 +244,8 @@ struct BCTool {
           bctool light  --host H [--state on|off] [--seconds 180]   (white spotlight, if present)
           bctool osd    --host H [--name N]                  (name shown in the picture; --verbose dumps the XML)
           bctool daynight --host H [--mode auto|color|bw]    (colour vs. monochrome picture)
+          bctool services --host H [--onvif on|off] [--rtsp on|off] [--rtmp on|off] [--http on|off] [--https on|off]
+                                                             (network services; omit to read, --verbose dumps the XML)
           bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
           bctool users  --host H                             (list user accounts)
           bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)

@@ -8,6 +8,9 @@ public enum BCMsgID {
     public static let videoStop: UInt32 = 4
     public static let ptzControl: UInt32 = 18
     public static let setISP: UInt32 = 25
+    /// Writes the `ServerPort` document (HTTP/HTTPS/RTSP/RTMP/ONVIF ports and switches); 37 reads it.
+    public static let setServerPorts: UInt32 = 36
+    public static let getServerPorts: UInt32 = 37
     /// Reads the on-screen display settings (`Osd` with `OsdChannelName`); 45 writes them back.
     public static let getOSD: UInt32 = 44
     public static let setOSD: UInt32 = 45
