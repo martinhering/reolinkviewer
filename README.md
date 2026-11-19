@@ -122,6 +122,8 @@ export BC_PASSWORD='…'
 .build/debug/bctool services --host 192.168.1.20 --onvif on       # also --rtsp/--rtmp/--http/--https; omit to read
 .build/debug/bctool users    --host 192.168.1.20                  # list user accounts
 .build/debug/bctool passwd   --host 192.168.1.20 --new 'secret'   # change the password, then log in with it
+.build/debug/bctool events   --host 192.168.1.20 --seconds 60     # ask for motion events and print them
+.build/debug/bctool record   --host 192.168.1.20 --out rec --seconds 180   # 1-minute MP4 files, no re-encoding
 ```
 
 For a camera that has no password yet, pass `--password` with no value.
@@ -241,6 +243,12 @@ it, port it or compare against another camera.
   changed. Switching it off makes the camera set `alarmMode` to 0 and keep the old value in
   `lastAlarmMode`; switching it on again restores it. Ids from Neolink and reolink_aio,
   verified on a fixed camera.
+- Motion events: id 31 without a body asks the camera to push them; they then arrive
+  unasked as id 33 with an `AlarmEventList`, one `AlarmEvent` per channel with `status`
+  (`MD` or `none`) and, on cameras with object detection, `AItype` (`people`, `vehicle`,
+  `dog_cat`, `none`). The camera pushes the current state right after the request, and
+  uses id 33 for other lists too (`DayNightEventList`), which are ignored. Ids and fields
+  from Neolink and reolink_aio, verified on an E1 and two fixed cameras.
 - Message id 4 with the same message number stops the stream; the camera sometimes
   pings with id 234, which is answered with code 200.
 
@@ -248,9 +256,11 @@ it, port it or compare against another camera.
 
 ```
 Sources/Baichuan/       protocol library (pure Swift, no dependencies)
+Sources/CameraMedia/    sample buffers from the camera's frames, MP4 segment recorder
 Sources/bctool/         command-line client
 Sources/ReolinkViewer/  the SwiftUI app
 Tests/BaichuanTests/    unit tests for framing, crypto, XML and media parsing
+Tests/CameraMediaTests/ unit tests for the sample builders and the segment recorder
 AppIcon.icon            app icon, an Icon Composer document (SF Symbol camera.fill on blue)
 build-app.sh            builds, signs and notarizes build/ReolinkViewer.app
 ```
@@ -263,7 +273,9 @@ swift test
 
 The tests need no camera. They cover header encoding, the login handshake, XOR and AES
 round trips with known answers, XML builders, the media parser (including chunk
-boundaries and resync after garbage) and the Day & Night document rewrite.
+boundaries and resync after garbage) and the Day & Night document rewrite. The recorder
+tests encode a short H.264 and H.265 stream with VideoToolbox, record it, and decode the
+MP4 files again; they are skipped on a Mac without the encoder.
 
 ### Debugging
 

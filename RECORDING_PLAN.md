@@ -121,19 +121,19 @@ Four phases, each usable on its own. Phase 1 decides whether the cameras' own mo
 
 | Phase | Builds | Done when | Status |
 | --- | --- | --- | --- |
-| 1. Proof on the command line | Motion events in the `Baichuan` library and `bctool events`. The MP4 minute writer and `bctool record`. The sample-buffer code moves out of `VideoRenderer.swift` into shared code. | Minute files from the E1 (H.264) and the fixed camera (H.265) play in QuickTime with sound. Motion events are confirmed or ruled out for both. | Not started |
+| 1. Proof on the command line | Motion events in the `Baichuan` library and `bctool events`. The MP4 minute writer and `bctool record`. The sample-buffer code moves out of `VideoRenderer.swift` into the shared `CameraMedia` target. | Minute files from the E1 (H.264) and the fixed camera (H.265) play in QuickTime with sound. Motion events are confirmed or ruled out for both. | Done on 19 November 2026 for the E1 and two fixed cameras: all accept the motion request and push events, and their minute files decode with sound. Open: no camera sends H.265 at present, so H.265 is covered only by the unit test |
 | 2. Recorder and settings | The Recording tab with the global settings. The daily window. The motion log and keep rule, with the frame-size fallback. The local folder and its cleanup. Headless mode, the LaunchAgent and stable code signing. | With the app closed, one night's window leaves only motion minutes on disk for every camera, across a camera restart and a Mac sleep. | Not started |
 | 3. Encryption and upload | The key file and the passphrase in the keychain. AES-256-GCM sealing. The S3 client, the upload queue, the day index and storage setup, which writes the lifecycle rule. | Kept minutes reach the bucket encrypted within 2 minutes. A one-hour outage is caught up. A downloaded file opens only with the passphrase. | Not started |
 | 4. Playback | The Recordings view with the timeline for one camera, then the synchronized grid. | A second Mac plays yesterday's recordings with only the bucket key and the passphrase. The grid keeps cameras within about a second. | Not started |
 
 ## Risks
 
-Six risks are known, and the first three are checked before most of the code is written.
+Six risks are known. The first two were checked in phase 1 and did not occur.
 
 | Risk | How it is checked | Fallback |
 | --- | --- | --- |
-| The cameras do not push motion events over Baichuan | `bctool events` on both camera models, phase 1 | Frame-size analysis for that camera, chosen automatically |
-| A camera refuses the viewer and the recorder at the same time | Live view and `bctool record` together, phase 1 | The recorder takes priority during the window, or the two use different streams |
+| The cameras do not push motion events over Baichuan | Checked in phase 1: the E1 and both fixed cameras accept the request and push their state; the E1 reported `MD` when it moved | Frame-size analysis for a camera that pushes none, chosen automatically |
+| A camera refuses the viewer and the recorder at the same time | Checked in phase 1: every camera served the Clear stream to two connections at once | The recorder takes priority during the window, or the two use different streams |
 | The background process cannot read the keychain when the build falls back to an ad-hoc signature, which changes with every build | Run the LaunchAgent after a rebuild, phase 2 | Build with the app's Apple Development certificate, so the recorder's identity stays stable |
 | Grid playback of several full-resolution streams is too heavy to decode or download | Measure with all cameras, including the 4512×2512 one, phase 4 | Also record the Fluent stream and use it in the grid |
 | The configured provider has no lifecycle rules | Provider documentation, when a bucket is configured | The recorder deletes expired objects itself, with a key that may delete |

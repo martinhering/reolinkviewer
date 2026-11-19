@@ -8,6 +8,9 @@ public enum BCMsgID {
     public static let videoStop: UInt32 = 4
     public static let ptzControl: UInt32 = 18
     public static let setISP: UInt32 = 25
+    /// Asks the camera to push motion events; they arrive as message 33 (`AlarmEventList`).
+    public static let motionRequest: UInt32 = 31
+    public static let motion: UInt32 = 33
     /// Writes the `ServerPort` document (HTTP/HTTPS/RTSP/RTMP/ONVIF ports and switches); 37 reads it.
     public static let setServerPorts: UInt32 = 36
     public static let getServerPorts: UInt32 = 37

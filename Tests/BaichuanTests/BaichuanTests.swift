@@ -459,3 +459,50 @@ final class FloodlightTaskConfigTests: XCTestCase {
         XCTAssertNil(FloodlightTaskConfig.replacingEnabled(in: nestedOnly, with: false))
     }
 }
+
+final class MotionEventTests: XCTestCase {
+    func testParsesAnAlarmEventList() {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" ?>
+        <body>
+        <AlarmEventList version="1.1">
+        <AlarmEvent version="1.1">
+        <channelId>0</channelId>
+        <status>MD</status>
+        <AItype>people</AItype>
+        <recording>0</recording>
+        <timeStamp>0</timeStamp>
+        </AlarmEvent>
+        </AlarmEventList>
+        </body>
+        """
+        let events = MotionEvent.parseList(xml)
+        XCTAssertEqual(events, [MotionEvent(channelId: 0, status: "MD", aiType: "people", recording: false)])
+        XCTAssertTrue(events[0].isMotion)
+        XCTAssertEqual(events[0].detectedObject, "people")
+    }
+
+    func testNoneMeansNoMotion() {
+        let xml = "<body><AlarmEventList version=\"1.1\"><AlarmEvent version=\"1.1\"><channelId>2</channelId>"
+            + "<status>none</status><AItype>none</AItype><recording>1</recording></AlarmEvent></AlarmEventList></body>"
+        let events = MotionEvent.parseList(xml)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].channelId, 2)
+        XCTAssertFalse(events[0].isMotion)
+        XCTAssertNil(events[0].detectedObject)
+        XCTAssertEqual(events[0].recording, true)
+    }
+
+    func testObjectDetectionAloneCountsAsMotion() {
+        let event = MotionEvent(channelId: 0, status: "none", aiType: "vehicle")
+        XCTAssertTrue(event.isMotion)
+    }
+
+    func testOlderFirmwareWithoutObjectDetection() {
+        let xml = "<body><AlarmEventList version=\"1.1\"><AlarmEvent version=\"1.1\">"
+            + "<status>MD</status></AlarmEvent></AlarmEventList></body>"
+        XCTAssertEqual(MotionEvent.parseList(xml, defaultChannel: 3), [MotionEvent(channelId: 3, status: "MD")])
+        XCTAssertTrue(MotionEvent.parseList("<body></body>").isEmpty)
+        XCTAssertTrue(MotionEvent.parseList("garbage").isEmpty)
+    }
+}

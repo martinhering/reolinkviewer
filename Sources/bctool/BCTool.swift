@@ -1,4 +1,5 @@
 import Baichuan
+import CameraMedia
 import Foundation
 
 /// Command-line harness for the Baichuan library.
@@ -6,6 +7,8 @@ import Foundation
 ///   bctool info   --host H [--port 9000] [--user admin]
 ///   bctool stream --host H [--sub] [--seconds 10] [--out file.h264]
 ///   bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
+///   bctool events --host H [--seconds 60]
+///   bctool record --host H --out DIR [--sub] [--seconds 180] [--segment 60] [--no-audio]
 ///
 /// The password comes from --password or the BC_PASSWORD environment variable.
 @main
@@ -176,6 +179,16 @@ struct BCTool {
                 try await streamCommand(camera: camera, kind: flags.contains("sub") ? .sub : .main,
                                         seconds: Double(options["seconds"] ?? "10") ?? 10, out: options["out"],
                                         audioOut: options["audio-out"])
+            case "events":
+                try await eventsCommand(camera: camera, seconds: Double(options["seconds"] ?? "60") ?? 60,
+                                        verbose: flags.contains("verbose"))
+            case "record":
+                guard let out = options["out"] else { usage() }
+                try await recordCommand(camera: camera, kind: flags.contains("sub") ? .sub : .main,
+                                        directory: URL(fileURLWithPath: out, isDirectory: true),
+                                        seconds: Double(options["seconds"] ?? "180") ?? 180,
+                                        segmentLength: Double(options["segment"] ?? "60") ?? 60,
+                                        audio: !flags.contains("no-audio"))
             default:
                 usage()
             }
@@ -249,6 +262,104 @@ struct BCTool {
         print("stream stopped")
     }
 
+    /// Local time with milliseconds, for lining events up with what happened in front of the camera.
+    static func clock(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f.string(from: date)
+    }
+
+    static func describe(_ event: MotionEvent) -> String {
+        var text = event.isMotion ? "motion" : "no motion"
+        text += "  status=\(event.status)"
+        if let ai = event.aiType { text += " AItype=\(ai)" }
+        if let recording = event.recording { text += " recording=\(recording ? 1 : 0)" }
+        return text
+    }
+
+    /// Asks for motion events and prints them as they arrive. Answers the question of phase 1
+    /// of the recording plan: does this camera push motion events over Baichuan?
+    static func eventsCommand(camera: BaichuanCamera, seconds: Double, verbose: Bool) async throws {
+        let counter = Counter()
+        await camera.setMotionHandler { event in
+            counter.increment()
+            print("  \(clock())  \(describe(event))")
+        }
+        do {
+            try await camera.startMotionEvents()
+        } catch {
+            print("motion events (message 31): refused, \(error)")
+            return
+        }
+        print("motion events (message 31): accepted. Listening for \(Int(seconds)) s; move in front of the camera, Ctrl-C to stop")
+        let interrupt = Interrupt()
+        let deadline = Date().addingTimeInterval(seconds)
+        var lastPing = Date()
+        while Date() < deadline, !interrupt.fired {
+            try await Task.sleep(for: .milliseconds(200))
+            // Nothing else is sent on this connection, so keep the session alive.
+            if Date().timeIntervalSince(lastPing) >= 10 {
+                lastPing = Date()
+                try await camera.ping()
+            }
+        }
+        let count = counter.value
+        print(count == 0
+              ? "no motion event in \(Int(Date().timeIntervalSince(deadline.addingTimeInterval(-seconds)))) s: the camera accepts the request but pushed nothing"
+              : "\(count) motion event\(count == 1 ? "" : "s") received")
+    }
+
+    /// Records the stream into MP4 files cut on the wall clock, and prints the camera's motion
+    /// events alongside.
+    static func recordCommand(camera: BaichuanCamera, kind: StreamKind, directory: URL, seconds: Double,
+                              segmentLength: Double, audio: Bool) async throws {
+        await camera.setMotionHandler { event in print("  \(clock())  \(describe(event))") }
+        do {
+            try await camera.startMotionEvents()
+            print("motion events (message 31): accepted")
+        } catch {
+            print("motion events (message 31): refused, \(error)")
+        }
+
+        let recorder = SegmentRecorder(directory: directory, segmentLength: segmentLength, recordAudio: audio)
+        let stream = try await camera.startVideo(kind)
+        print("recording \(kind.rawValue) stream to \(directory.path) for \(Int(seconds)) s in \(Int(segmentLength)) s files"
+              + (audio ? " with sound" : " without sound") + ", Ctrl-C to stop")
+        let interrupt = Interrupt()
+        let deadline = Date().addingTimeInterval(seconds)
+        var files = 0
+        func report(_ segment: SegmentRecorder.Segment) {
+            files += 1
+            print(String(format: "  %@  %@  %.1f s, %@ %dx%d, %d frames (%d key), %d audio frames, %.1f MB",
+                         clock(segment.start), segment.url.path, segment.duration, segment.codec.rawValue,
+                         segment.width, segment.height, segment.videoFrames, segment.keyFrames, segment.audioFrames,
+                         Double(segment.bytes) / 1e6))
+        }
+        // Ends the stream when time is up, also while no frame arrives.
+        let stopper = Task {
+            while Date() < deadline, !interrupt.fired, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            if !Task.isCancelled { await camera.stopVideo() }
+        }
+        defer { stopper.cancel() }
+        // A dropped connection must not cost the file that was being written.
+        var failure: Error? = nil
+        do {
+            for try await frame in stream {
+                if let segment = try await recorder.append(frame) { report(segment) }
+            }
+        } catch {
+            failure = error
+        }
+        if let segment = try await recorder.finish() { report(segment) }
+        if let failure { throw failure }
+        await camera.stopVideo()
+        print("recording stopped, \(files) file\(files == 1 ? "" : "s")"
+              + (recorder.discontinuities > 0 ? ", \(recorder.discontinuities) time stamp jumps" : ""))
+    }
+
     static func usage() -> Never {
         print("""
         usage:
@@ -266,6 +377,9 @@ struct BCTool {
                                                              (network services; omit to read, --verbose dumps the XML)
           bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
           bctool users  --host H                             (list user accounts)
+          bctool events --host H [--seconds 60]              (ask for motion events and print them; --verbose dumps the XML)
+          bctool record --host H --out DIR [--sub] [--seconds 180] [--segment 60] [--no-audio]
+                                                             (MP4 files cut on the wall clock, no re-encoding; prints motion events)
           bctool raw    --host H --id N [--no-extension]     (send a request without a body, print the reply)
           bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)
         password: --password or BC_PASSWORD (may be empty for a camera not yet set up)
@@ -277,5 +391,45 @@ struct BCTool {
     static func fail(_ message: String) -> Never {
         FileHandle.standardError.write(Data(("error: " + message + "\n").utf8))
         exit(1)
+    }
+}
+
+/// Counts from any thread.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+    }
+
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+}
+
+/// Turns Ctrl-C into a flag, so a command can close its files before it exits.
+final class Interrupt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    private let source: DispatchSourceSignal
+
+    init() {
+        signal(SIGINT, SIG_IGN)
+        source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        source.setEventHandler { [weak self] in self?.set() }
+        source.resume()
+    }
+
+    private func set() {
+        lock.lock(); defer { lock.unlock() }
+        flag = true
+    }
+
+    var fired: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return flag
     }
 }

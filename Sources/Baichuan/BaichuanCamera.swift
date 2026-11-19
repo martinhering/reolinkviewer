@@ -160,6 +160,7 @@ public actor BaichuanCamera {
 
     private var connection: BCConnection?
     private var spotlightHandler: (@Sendable (Bool) -> Void)?
+    var motionHandler: (@Sendable (MotionEvent) -> Void)?
     /// The spotlight state the camera last reported (message 291); nil until it reports one.
     /// Cameras with a spotlight send it unasked right after login.
     public private(set) var spotlightState: Bool?
@@ -205,6 +206,7 @@ public actor BaichuanCamera {
         }
         connection = conn
         await installSpotlightHandler(on: conn)
+        await installMotionHandler(on: conn)
         do {
             let info = try await login(conn)
             deviceInfo = info
@@ -259,7 +261,7 @@ public actor BaichuanCamera {
         return DeviceInfo(fields: fields, rawXML: infoXML)
     }
 
-    private func requireConnection() throws -> BCConnection {
+    func requireConnection() throws -> BCConnection {
         guard let conn = connection else { throw BCError.notConnected }
         return conn
     }

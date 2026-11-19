@@ -12,10 +12,14 @@ let package = Package(
     targets: [
         // Pure-Swift implementation of Reolink's Baichuan ("BC") protocol, TCP port 9000.
         .target(name: "Baichuan"),
-        // Command-line test harness: login, stream dump, PTZ.
-        .executableTarget(name: "bctool", dependencies: ["Baichuan"]),
+        // CoreMedia glue shared by the app and bctool: sample buffers from the camera's
+        // frames, and the MP4 segment recorder.
+        .target(name: "CameraMedia", dependencies: ["Baichuan"]),
+        // Command-line test harness: login, stream dump, PTZ, motion events, recording.
+        .executableTarget(name: "bctool", dependencies: ["Baichuan", "CameraMedia"]),
         // SwiftUI viewer app.
-        .executableTarget(name: "ReolinkViewer", dependencies: ["Baichuan"], exclude: ["Info.plist"]),
+        .executableTarget(name: "ReolinkViewer", dependencies: ["Baichuan", "CameraMedia"], exclude: ["Info.plist"]),
         .testTarget(name: "BaichuanTests", dependencies: ["Baichuan"]),
+        .testTarget(name: "CameraMediaTests", dependencies: ["CameraMedia"]),
     ]
 )
