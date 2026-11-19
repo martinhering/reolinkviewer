@@ -287,7 +287,50 @@ aws s3 cp data-key.json s3://my-cams/keys/data-key.json                         
 
 Recordings already in the old bucket stay there until its own lifecycle rule deletes them.
 
-Playing the recordings back in the app is planned; see [RECORDING_PLAN.md](RECORDING_PLAN.md).
+**Playback user (for the Recordings window).** A third key that may download and nothing
+else. Enter it under the key button in the Recordings window.
+
+```sh
+aws iam create-user --user-name my-cams-playback
+aws iam put-user-policy --user-name my-cams-playback --policy-name playback --policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": ["arn:aws:s3:::my-cams/recordings/*", "arn:aws:s3:::my-cams/keys/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-cams"
+    }
+  ]
+}'
+aws iam create-access-key --user-name my-cams-playback
+```
+
+### Playing recordings
+
+The **Recordings** window (toolbar button, or ⇧⌘R) plays what was recorded, once off-site
+storage is set up.
+
+- **Day and camera** are chosen in the toolbar: one camera, or *All Cameras* in step.
+- **Timeline:** one lane per camera, a block for every recorded minute, motion marked in
+  orange. Click or drag to move the playhead; the menu on the right zooms from the whole
+  day down to ten minutes around the playhead.
+- **Playing** runs through consecutive minutes without a break and jumps over the times
+  nobody recorded. Speeds are 1× to 8×; above 2× without sound.
+- **All cameras:** one playhead drives every camera. Only the cameras that have a recording
+  at that moment get a tile, so the grid re-flows as they come and go. Click a tile to see
+  that camera alone at the same moment; the speaker on a tile picks the one camera you hear.
+  The cameras are in step to about a second.
+- **Saving:** with one camera shown, the button on the right saves the minute under the
+  playhead as an MP4 file.
+- **Where it reads from:** the sealed files on this Mac, for as long as the clean-up keeps
+  them, decrypted in memory. Older recordings, and all recordings on a Mac that does not
+  record, come from the bucket with a read-only *playback key*: the key button in the
+  toolbar. A second Mac needs the bucket's address, that key and the passphrase.
 
 ## Command-line tool
 

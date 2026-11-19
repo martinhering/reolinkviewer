@@ -27,6 +27,13 @@ struct ReolinkViewerApp: App {
             CameraCommands(store: store)
         }
 
+        Window("Recordings", id: "recordings") {
+            RecordingsView()
+                .environmentObject(store)
+        }
+        .defaultSize(width: 1120, height: 760)
+        .keyboardShortcut("r", modifiers: [.command, .shift])
+
         Settings {
             TabView {
                 SettingsView()

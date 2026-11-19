@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: CameraStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -80,6 +81,10 @@ struct ContentView: View {
                     Button { store.reconnect() } label: { Label("Reconnect", systemImage: "arrow.clockwise") }
                         .help(store.showsGrid ? "Reconnect to all cameras" : "Reconnect to the camera")
                 }
+            }
+            ToolbarItem {
+                Button { openWindow(id: "recordings") } label: { Label("Recordings", systemImage: "film.stack") }
+                    .help("Play back what the cameras recorded")
             }
             ToolbarItem {
                 SettingsLink { Label("Settings", systemImage: "gearshape") }

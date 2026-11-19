@@ -30,6 +30,75 @@ enum StorageStore {
                             credentials: S3Credentials(accessKeyID: settings.uploadKeyID, secretAccessKey: secret), vault: vault)
     }
 
+    // MARK: Playback
+
+    private static let readSecretAccount = "storage/readSecret"
+
+    /// What the Recordings view reads with, or nil while this Mac has no key file it can open.
+    /// Without a playback key it plays what is in the local cache.
+    static func loadLibrary() -> RecordingLibrary? {
+        let settings = StorageSettings.load()
+        let env = ProcessInfo.processInfo.environment
+        guard let passphrase = env["REOLINK_PASSPHRASE"] ?? Keychain.read(service: service, account: passphraseAccount),
+              let keyFile = try? Data(contentsOf: keyFileURL),
+              let vault = try? Vault(keyFile: keyFile, passphrase: passphrase) else { return nil }
+        var reader: S3Client?
+        if let configuration = settings.configuration, !settings.readKeyID.isEmpty,
+           let secret = Keychain.read(service: service, account: readSecretAccount), !secret.isEmpty {
+            reader = S3Client(configuration: configuration,
+                              credentials: S3Credentials(accessKeyID: settings.readKeyID, secretAccessKey: secret))
+        }
+        var root = RecordingStore.defaultDirectory
+        if let override = env["REOLINK_RECORDINGS_DIR"], !override.isEmpty { root = URL(fileURLWithPath: override, isDirectory: true) }
+        return RecordingLibrary(root: root, vault: vault, reader: reader)
+    }
+
+    /// Stores a read-only key for playback after checking that it can download the bucket's
+    /// key file and that the passphrase opens it. On a Mac that does not record, this is all
+    /// the setup there is: it also brings the key file and the passphrase onto this Mac.
+    /// - Parameter passphrase: empty to use the one in the keychain.
+    static func connectForPlayback(settings input: StorageSettings, readSecret: String, passphrase entered: String) async throws {
+        guard let configuration = input.configuration, !input.readKeyID.isEmpty, !readSecret.isEmpty else {
+            throw SetupError("The endpoint, the bucket or the key is missing.")
+        }
+        let client = S3Client(configuration: configuration,
+                              credentials: S3Credentials(accessKeyID: input.readKeyID, secretAccessKey: readSecret))
+        let keyFile: Data
+        do {
+            keyFile = try await client.getObject(key: StorageLayout.keyFileKey)
+        } catch let error as S3Error where error.isNotFound {
+            throw SetupError("The bucket has no key file: nothing was recorded into it yet.")
+        } catch {
+            throw SetupError("The playback key cannot download from the bucket: \(describe(error))")
+        }
+        let stored = Keychain.read(service: service, account: passphraseAccount)
+        guard let passphrase = entered.isEmpty ? stored : entered, !passphrase.isEmpty else {
+            throw SetupError("Enter the passphrase the bucket was set up with.")
+        }
+        do {
+            _ = try Vault(keyFile: keyFile, passphrase: passphrase)
+        } catch {
+            throw SetupError("The bucket's key file did not open: \(describe(error)).")
+        }
+        do {
+            try FileManager.default.createDirectory(at: StorageSettings.keyFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try keyFile.write(to: StorageSettings.keyFileURL, options: .atomic)
+        } catch {
+            throw SetupError("The key file could not be saved on this Mac: \(error.localizedDescription)")
+        }
+        if passphrase != stored { Keychain.write(passphrase, service: service, account: passphraseAccount) }
+        Keychain.write(readSecret, service: service, account: readSecretAccount)
+        // Keep what recording setup stored; only the playback key is new.
+        var settings = StorageSettings.load()
+        if !settings.isConfigured {
+            settings.endpoint = input.endpoint
+            settings.region = input.region
+            settings.bucket = input.bucket
+        }
+        settings.readKeyID = input.readKeyID
+        settings.save()
+    }
+
     // MARK: Setup
 
     struct SetupInput {
@@ -139,7 +208,11 @@ enum StorageStore {
         }
         Keychain.write(input.uploadSecret, service: service, account: secretAccount)
         Keychain.write(passphrase, service: service, account: passphraseAccount)
-        input.settings.save()
+        var settings = input.settings
+        let previous = StorageSettings.load()
+        // A playback key for the same bucket stays valid.
+        if previous.configuration == settings.configuration { settings.readKeyID = previous.readKeyID } else { settings.readKeyID = "" }
+        settings.save()
         SettingsStore.notifyRecorder()
         return SetupResult(generatedPassphrase: generated, joinedExistingBucket: existing != nil)
     }

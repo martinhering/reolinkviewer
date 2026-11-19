@@ -12,9 +12,12 @@ public struct StorageSettings: Equatable, Sendable {
     /// Days after which the bucket deletes a recording. Chosen once in storage setup, which
     /// writes the bucket's lifecycle rule; shown read-only afterwards.
     public var retentionDays = 14
+    /// Id of the read-only key the Recordings view downloads with; empty plays the local cache only.
+    public var readKeyID = ""
 
     public init() {}
 
+    /// Set up for recording: the recorder can upload.
     public var isConfigured: Bool { configuration != nil && !uploadKeyID.isEmpty }
 
     public var configuration: S3Configuration? {
@@ -30,6 +33,7 @@ public struct StorageSettings: Equatable, Sendable {
         static let bucket = "storage.bucket"
         static let uploadKeyID = "storage.uploadKeyID"
         static let retentionDays = "storage.retentionDays"
+        static let readKeyID = "storage.readKeyID"
     }
 
     public static func load(from defaults: UserDefaults = .standard) -> StorageSettings {
@@ -38,6 +42,7 @@ public struct StorageSettings: Equatable, Sendable {
         s.region = defaults.string(forKey: Key.region) ?? ""
         s.bucket = defaults.string(forKey: Key.bucket) ?? ""
         s.uploadKeyID = defaults.string(forKey: Key.uploadKeyID) ?? ""
+        s.readKeyID = defaults.string(forKey: Key.readKeyID) ?? ""
         if defaults.object(forKey: Key.retentionDays) != nil { s.retentionDays = max(1, defaults.integer(forKey: Key.retentionDays)) }
         return s
     }
@@ -47,6 +52,7 @@ public struct StorageSettings: Equatable, Sendable {
         defaults.set(region, forKey: Key.region)
         defaults.set(bucket, forKey: Key.bucket)
         defaults.set(uploadKeyID, forKey: Key.uploadKeyID)
+        defaults.set(readKeyID, forKey: Key.readKeyID)
         defaults.set(retentionDays, forKey: Key.retentionDays)
     }
 
