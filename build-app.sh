@@ -5,7 +5,10 @@
 #
 # Environment:
 #   CODESIGN_IDENTITY   certificate name or SHA-1 hash. Default: the first "Developer ID
-#                       Application" certificate in the keychain, else ad-hoc (this Mac only).
+#                       Application" certificate in the keychain, else the first "Apple
+#                       Development" one (this Mac only, but the keychain keeps trusting the
+#                       app across rebuilds), else ad-hoc (this Mac only, and the keychain
+#                       asks for the camera passwords again after every build).
 #   APP_BUILD           written to CFBundleVersion (CI passes the commit count).
 #   NOTARY_PROFILE      notarytool keychain profile, created once with
 #                       xcrun notarytool store-credentials <profile> --apple-id … --team-id … --password …
@@ -56,7 +59,10 @@ if [ -z "$CODESIGN_IDENTITY" ]; then
     CODESIGN_IDENTITY=$(security find-identity -v -p codesigning | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
 fi
 if [ -z "$CODESIGN_IDENTITY" ]; then
-    echo "▸ no Developer ID certificate found: signing ad-hoc (runs on this Mac only)"
+    CODESIGN_IDENTITY=$(security find-identity -v -p codesigning | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')
+fi
+if [ -z "$CODESIGN_IDENTITY" ]; then
+    echo "▸ no Developer ID or Apple Development certificate found: signing ad-hoc (runs on this Mac only)"
     codesign --force --sign - "$APP"
     echo "Built $APP (ad-hoc)"
     exit 0
@@ -74,6 +80,18 @@ fi
 echo "▸ signing with: $CODESIGN_IDENTITY ($IDENTITY_HASH)"
 codesign --force --timestamp --options runtime --sign "$IDENTITY_HASH" "$APP"
 codesign --verify --strict --verbose=1 "$APP"
+
+# Only a Developer ID signature can be notarized; a development one is for this Mac.
+case "$(codesign -dv --verbose=2 "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)" in
+    "Developer ID Application:"*) ;;
+    *)
+        if [ -n "$REQUIRE_NOTARIZATION" ]; then
+            echo "cannot notarize: $CODESIGN_IDENTITY is not a Developer ID Application certificate" >&2
+            exit 1
+        fi
+        echo "Built $APP (signed for development, runs on this Mac only)"
+        exit 0 ;;
+esac
 
 if [ -n "$NOTARY_PROFILE" ]; then
     set -- --keychain-profile "$NOTARY_PROFILE"

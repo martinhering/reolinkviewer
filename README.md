@@ -47,8 +47,10 @@ open build/ReolinkViewer.app
 ```
 
 `build-app.sh` produces a universal (Apple silicon + Intel) binary and signs it with the
-first Developer ID certificate in your keychain, or ad-hoc if there is none. An ad-hoc
-signed app runs only on the Mac that built it; see
+first Developer ID certificate in your keychain, else the first Apple Development one, or
+ad-hoc if there is neither. Without a Developer ID the app runs only on the Mac that built
+it, and an ad-hoc signed app makes the keychain ask for the camera passwords again after
+every build, since each build counts as a different app; see
 [Signing and notarizing a release](#signing-and-notarizing-a-release) to pass it on.
 
 Alternatively `open Package.swift` in Xcode and run the `ReolinkViewer` scheme. A bare
@@ -290,7 +292,8 @@ certificate in this order:
 1. `CODESIGN_IDENTITY` if set (a certificate name or its SHA-1 hash from
    `security find-identity -v -p codesigning`),
 2. otherwise the first **Developer ID Application** certificate in the keychain,
-3. otherwise ad-hoc.
+3. otherwise the first **Apple Development** certificate (signed, never notarized),
+4. otherwise ad-hoc.
 
 One-time setup:
 
