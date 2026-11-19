@@ -21,6 +21,7 @@ commands while you hold an arrow button or key.
 - Sound from the camera's microphone, in step with the picture, with a mute toggle
 - Night-vision controls (Day & Night mode and the infrared illuminator), as in the Reolink app
 - A switch for the white spotlight on cameras that have one
+- A switch for whether the spotlight comes on by itself when the camera sees motion in the dark
 - Switches for the camera's network services (ONVIF, RTSP, RTMP, HTTP, HTTPS) in Settings
 - Automatic reconnection when the camera drops the connection or stops sending frames
 - Credentials stay in your login keychain; nothing about your cameras is baked into the app
@@ -90,6 +91,8 @@ is written to the camera at once.
   manual "on" for three minutes, so the app renews it for as long as the button is on and the
   camera is on screen. Switching to another camera lets the light go back to its automatic
   behaviour within three minutes.
+  Whether the camera also lights it by itself, on motion in the dark, is the **Turn on by
+  itself** switch under Spotlight in Settings.
 - **Reconnect** (⌘R) restarts the connection by hand, for every camera on screen. The app
   also does this by itself when a camera drops the connection or stops sending frames.
 
@@ -110,6 +113,8 @@ export BC_PASSWORD='…'
 .build/debug/bctool ir       --host 192.168.1.20 --mode off       # auto | on | off; omit to read
 .build/debug/bctool led      --host 192.168.1.20 --state off      # blue status LED; omit to read
 .build/debug/bctool light    --host 192.168.1.20 --state on       # white spotlight, 180 s; omit to probe
+.build/debug/bctool light    --host 192.168.1.20 --auto off       # spotlight no longer comes on by itself at night
+.build/debug/bctool raw      --host 192.168.1.20 --id 289         # any request without a body; prints the reply
 .build/debug/bctool daynight --host 192.168.1.20 --mode color     # auto | color | bw; omit to read
 .build/debug/bctool osd      --host 192.168.1.20 --name 'Garden'  # name shown in the picture; omit to read
 .build/debug/bctool services --host 192.168.1.20 --onvif on       # also --rtsp/--rtmp/--http/--https; omit to read
@@ -228,6 +233,12 @@ it, port it or compare against another camera.
   either one answers. Message id 288 with `FloodlightManual` (`channelId`, `status` 1/0,
   `duration` in seconds) switches it; the camera confirms with a 291 report. From Neolink,
   verified on the fixed camera.
+- Automatic spotlight: message id 289 returns the same `FloodlightTask` document on cameras
+  that refuse 438: `enable` 1/0 (whether the light comes on by itself), `alarmMode` (1 = on
+  motion in the dark), brightness and schedules. Id 290 takes the document back with `enable`
+  changed. Switching it off makes the camera set `alarmMode` to 0 and keep the old value in
+  `lastAlarmMode`; switching it on again restores it. Ids from Neolink and reolink_aio,
+  verified on a fixed camera.
 - Message id 4 with the same message number stops the stream; the camera sometimes
   pings with id 234, which is answered with code 200.
 

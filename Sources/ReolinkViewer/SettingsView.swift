@@ -132,6 +132,12 @@ struct CameraForm: View {
     @State private var services: [CameraService: CameraServiceState]?
     @State private var servicesBusy = false
     @State private var servicesError: String?
+    /// Whether the camera lights its spotlight by itself; nil until read, or if it has none.
+    @State private var spotlightAutomatic: Bool?
+    @State private var spotlightBusy = false
+    @State private var spotlightError: String?
+    /// The camera answered, but not with spotlight settings: it has no spotlight.
+    @State private var spotlightMissing = false
 
     var body: some View {
         Form {
@@ -165,6 +171,31 @@ struct CameraForm: View {
                     Text("Speed: \(Int(camera.ptzSpeed))")
                 }
                 Text("32 is what the Reolink app uses.").font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Turn on by itself", isOn: Binding(
+                    get: { spotlightAutomatic ?? false },
+                    set: { setSpotlightAutomatic($0) }))
+                    .disabled(spotlightBusy || spotlightAutomatic == nil)
+                    .help("Let the camera switch its white spotlight on when it detects motion in the dark")
+                Text(spotlightStatus).font(.caption).foregroundStyle(spotlightError == nil ? Color.secondary : Color.red).textSelection(.enabled)
+            } header: {
+                HStack {
+                    Text("Spotlight")
+                    Spacer()
+                    if spotlightBusy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button {
+                            readSpotlightAutomatic()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(!canReachCamera)
+                        .help("Read the current state from the camera")
+                    }
+                }
             }
             Section {
                 ForEach(CameraService.allCases) { service in
@@ -203,12 +234,21 @@ struct CameraForm: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { readServices() }
+        .onAppear {
+            readServices()
+            readSpotlightAutomatic()
+        }
         .onChange(of: camera.id) { _, _ in
             nameResult = nil
             services = nil
             servicesError = nil
+            servicesBusy = false
+            spotlightAutomatic = nil
+            spotlightError = nil
+            spotlightMissing = false
+            spotlightBusy = false
             readServices()
+            readSpotlightAutomatic()
         }
         .sheet(isPresented: $changingPassword) {
             ChangePasswordSheet(camera: camera) { newPassword in
@@ -282,6 +322,63 @@ extension CameraForm {
                 if camera.id == id { servicesError = "Could not switch \(service.displayName) \(enabled ? "on" : "off"): \(error)" }
             }
             if camera.id == id { servicesBusy = false }
+        }
+    }
+
+    fileprivate var spotlightStatus: String {
+        if let spotlightError { return spotlightError }
+        if spotlightBusy { return spotlightAutomatic == nil ? "Asking the camera…" : "Writing to the camera…" }
+        if spotlightMissing { return "This camera does not report spotlight settings." }
+        guard let spotlightAutomatic else {
+            return canReachCamera ? "Not read yet." : "Enter the address and username to read this from the camera."
+        }
+        return spotlightAutomatic
+            ? "The camera lights its spotlight when it detects motion in the dark. Changes take effect at once."
+            : "The spotlight stays dark unless you switch it on with the light bulb button."
+    }
+
+    /// Reads the spotlight's automatic setting from the camera, with the form's current credentials.
+    fileprivate func readSpotlightAutomatic() {
+        guard canReachCamera, !spotlightBusy else { return }
+        let id = camera.id
+        spotlightBusy = true
+        spotlightError = nil
+        spotlightMissing = false
+        Task {
+            do {
+                let result = try await store.readSpotlightAutomatic(from: target)
+                if camera.id == id { spotlightAutomatic = result }
+            } catch BCError.unexpectedReply {
+                // Logged in fine, but the camera refused the request: no spotlight.
+                if camera.id == id {
+                    spotlightAutomatic = nil
+                    spotlightMissing = true
+                }
+            } catch {
+                if camera.id == id { spotlightError = "Could not read the spotlight settings: \(error)" }
+            }
+            if camera.id == id { spotlightBusy = false }
+        }
+    }
+
+    /// Switches the spotlight's automatic behaviour on the camera and shows what it reports afterwards.
+    fileprivate func setSpotlightAutomatic(_ enabled: Bool) {
+        guard canReachCamera, !spotlightBusy else { return }
+        let id = camera.id
+        spotlightBusy = true
+        spotlightError = nil
+        Task {
+            do {
+                let result = try await store.setSpotlightAutomatic(enabled, on: target)
+                guard camera.id == id else { return }
+                spotlightAutomatic = result
+                if result != enabled {
+                    spotlightError = "The camera accepted the change but still reports the automatic spotlight \(enabled ? "off" : "on")."
+                }
+            } catch {
+                if camera.id == id { spotlightError = "Could not switch the automatic spotlight \(enabled ? "on" : "off"): \(error)" }
+            }
+            if camera.id == id { spotlightBusy = false }
         }
     }
 

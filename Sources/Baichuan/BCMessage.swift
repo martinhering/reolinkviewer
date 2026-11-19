@@ -25,9 +25,12 @@ public enum BCMsgID {
     public static let udpKeepAlive: UInt32 = 234
     /// Switches the white spotlight on or off for a while.
     public static let floodlightManual: UInt32 = 288
+    /// Reads the spotlight's automatic settings (`FloodlightTask`); 290 writes them back.
+    public static let getFloodlightTask: UInt32 = 289
+    public static let setFloodlightTask: UInt32 = 290
     /// Sent by the camera whenever the spotlight goes on or off.
     public static let floodlightStatusList: UInt32 = 291
-    /// Reads the spotlight's automatic settings; only cameras with a spotlight answer with 200.
+    /// Another way to read the spotlight's automatic settings; some firmware refuses it (405) and answers 289 instead.
     public static let floodlightTasksRead: UInt32 = 438
 }
 

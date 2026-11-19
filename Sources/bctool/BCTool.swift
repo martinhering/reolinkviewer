@@ -94,7 +94,24 @@ struct BCTool {
                     try await camera.setSpotlight(stateText == "on", duration: seconds)
                     print("spotlight switched \(stateText)" + (stateText == "on" ? " for \(seconds) s" : ""))
                 }
+                if let autoText = options["auto"] {
+                    guard autoText == "on" || autoText == "off" else { usage() }
+                    try await camera.setSpotlightAutomatic(autoText == "on")
+                    print("automatic spotlight switched \(autoText)")
+                }
+                if let automatic = try? await camera.getSpotlightAutomatic() {
+                    print("automatic spotlight (on motion in the dark): \(automatic ? "on" : "off")")
+                    if flags.contains("verbose") { print(try await camera.getFloodlightTaskXML()) }
+                }
                 try await Task.sleep(for: .seconds(2))  // let the camera report the change
+            case "raw":
+                guard let id = options["id"].flatMap({ UInt32($0) }) else { usage() }
+                if let reply = try await camera.query(msgId: id, withChannelExtension: !flags.contains("no-extension")) {
+                    print("message \(id): code \(reply.code)")
+                    if let xml = reply.xml { print(xml) }
+                } else {
+                    print("message \(id): no reply")
+                }
             case "osd":
                 if flags.contains("verbose") { print(try await camera.getOSDConfigXML()) }
                 if let name = options["name"] {
@@ -241,13 +258,15 @@ struct BCTool {
           bctool switch --host H          (main → sub → main, 3 s each)
           bctool ir     --host H [--mode auto|on|off]        (infrared LEDs)
           bctool led    --host H [--state on|off]            (blue status LED)
-          bctool light  --host H [--state on|off] [--seconds 180]   (white spotlight, if present)
+          bctool light  --host H [--state on|off] [--seconds 180] [--auto on|off]
+                                                             (white spotlight, if present; --auto: on by itself at night)
           bctool osd    --host H [--name N]                  (name shown in the picture; --verbose dumps the XML)
           bctool daynight --host H [--mode auto|color|bw]    (colour vs. monochrome picture)
           bctool services --host H [--onvif on|off] [--rtsp on|off] [--rtmp on|off] [--http on|off] [--https on|off]
                                                              (network services; omit to read, --verbose dumps the XML)
           bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
           bctool users  --host H                             (list user accounts)
+          bctool raw    --host H --id N [--no-extension]     (send a request without a body, print the reply)
           bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)
         password: --password or BC_PASSWORD (may be empty for a camera not yet set up)
         new password: --new or BC_NEW_PASSWORD

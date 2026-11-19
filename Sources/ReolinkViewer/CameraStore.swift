@@ -134,6 +134,23 @@ final class CameraStore: ObservableObject {
         return try await client.getServices()
     }
 
+    /// Asks the camera whether it switches its spotlight on by itself (on motion in the dark).
+    func readSpotlightAutomatic(from camera: CameraSettings) async throws -> Bool {
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        try await client.connect()
+        defer { Task { await client.disconnect() } }
+        return try await client.getSpotlightAutomatic()
+    }
+
+    /// Switches the spotlight's automatic behaviour and returns what the camera reports afterwards.
+    func setSpotlightAutomatic(_ enabled: Bool, on camera: CameraSettings) async throws -> Bool {
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        try await client.connect()
+        defer { Task { await client.disconnect() } }
+        try await client.setSpotlightAutomatic(enabled)
+        return try await client.getSpotlightAutomatic()
+    }
+
     // MARK: Selection
 
     /// Shows `id` on its own, leaving the grid if needed.

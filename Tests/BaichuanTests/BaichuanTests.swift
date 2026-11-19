@@ -420,3 +420,42 @@ final class ServerPortConfigTests: XCTestCase {
         XCTAssertNil(ServerPortConfig.replacingEnabled(of: .onvif, in: "<body/>", with: true))
     }
 }
+
+final class FloodlightTaskConfigTests: XCTestCase {
+    /// Shortened from what a fixed camera with a spotlight answers to message 289.
+    private let xml = """
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <body>
+    <FloodlightTask version="1.1">
+    <channel>0</channel>
+    <alarmMode>1</alarmMode>
+    <enable>1</enable>
+    <lastAlarmMode>1</lastAlarmMode>
+    <brightness_cur>100</brightness_cur>
+    <nightLongViewMultiBrightness>
+    <enable>0</enable>
+    </nightLongViewMultiBrightness>
+    <detectType>people,vehicle,dog_cat</detectType>
+    </FloodlightTask>
+    </body>
+    """
+
+    func testReadsTheTasksOwnSwitch() {
+        XCTAssertEqual(FloodlightTaskConfig.enabled(in: xml), true)
+        XCTAssertNil(FloodlightTaskConfig.enabled(in: "<body/>"))
+    }
+
+    func testReplacesOnlyTheTasksOwnSwitch() {
+        let out = FloodlightTaskConfig.replacingEnabled(in: xml, with: false)
+        XCTAssertEqual(out, xml.replacingOccurrences(of: "<alarmMode>1</alarmMode>\n<enable>1</enable>",
+                                                     with: "<alarmMode>1</alarmMode>\n<enable>0</enable>"))
+        XCTAssertEqual(FloodlightTaskConfig.enabled(in: out!), false)
+        XCTAssertEqual(FloodlightTaskConfig.replacingEnabled(in: out!, with: true), xml)
+    }
+
+    func testIgnoresANestedSwitchWhenTheTaskHasNone() {
+        let nestedOnly = xml.replacingOccurrences(of: "<alarmMode>1</alarmMode>\n<enable>1</enable>\n", with: "<alarmMode>1</alarmMode>\n")
+        XCTAssertNil(FloodlightTaskConfig.enabled(in: nestedOnly))
+        XCTAssertNil(FloodlightTaskConfig.replacingEnabled(in: nestedOnly, with: false))
+    }
+}

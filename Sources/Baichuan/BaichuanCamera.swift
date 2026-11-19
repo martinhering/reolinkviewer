@@ -292,6 +292,19 @@ public actor BaichuanCamera {
         }
     }
 
+    /// Sends a request that has no body and returns the camera's reply code and XML (nil when
+    /// it does not answer in time). For exploring what a camera supports.
+    public func query(msgId: UInt32, withChannelExtension: Bool = true, timeout: TimeInterval = 3) async throws -> (code: UInt16, xml: String?)? {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: msgId, channelId: channelId, msgNum: num,
+                                      extensionXML: withChannelExtension ? BCXML.extensionDocument(channelId: channelId) : nil))
+        guard let reply = try? await sub.next(timeout: timeout) else { return nil }
+        return (reply.responseCode, reply.xml)
+    }
+
     // MARK: LEDs
 
     public func getLEDState() async throws -> LEDState {
@@ -392,6 +405,51 @@ public actor BaichuanCamera {
         guard let reply = try? await sub.next(timeout: 1) else { return }
         guard reply.responseCode == 200 else {
             throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "spotlight command rejected")
+        }
+    }
+
+    /// The camera's automatic spotlight settings XML (`FloodlightTask`, message 289): whether
+    /// the light comes on by itself (`enable`), how (`alarmMode`), brightness and schedules.
+    public func getFloodlightTaskXML() async throws -> String {
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.getFloodlightTask, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(channelId: channelId)))
+        let reply = try await sub.next(timeout: 5)
+        guard reply.responseCode == 200, let xml = reply.xml, let end = xml.lastIndex(of: ">") else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "expected spotlight settings")
+        }
+        return String(xml[...end])
+    }
+
+    /// Whether the camera switches its spotlight on by itself: with the usual "night smart"
+    /// mode, when it detects motion in the dark.
+    public func getSpotlightAutomatic() async throws -> Bool {
+        let xml = try await getFloodlightTaskXML()
+        guard let enabled = FloodlightTaskConfig.enabled(in: xml) else {
+            throw BCError.malformedXML("no FloodlightTask/enable in the reply to message 289; the camera sent: \(xml.prefix(600))")
+        }
+        return enabled
+    }
+
+    /// Reads the spotlight settings, flips only `enable`, and writes them back (message 290).
+    /// The manual switch (`setSpotlight`) keeps working either way.
+    public func setSpotlightAutomatic(_ enabled: Bool) async throws {
+        let xml = try await getFloodlightTaskXML()
+        guard let updated = FloodlightTaskConfig.replacingEnabled(in: xml, with: enabled) else {
+            throw BCError.malformedXML("no FloodlightTask/enable in the spotlight settings")
+        }
+        let conn = try requireConnection()
+        let num = await conn.nextMessageNumber()
+        let sub = await conn.subscribe(num)
+        defer { Task { await conn.unsubscribe(num) } }
+        try await conn.send(BCMessage(msgId: BCMsgID.setFloodlightTask, channelId: channelId, msgNum: num,
+                                      extensionXML: BCXML.extensionDocument(channelId: channelId), payload: .xml(updated)))
+        guard let reply = try? await sub.next(timeout: 2) else { return }
+        guard reply.responseCode == 200 else {
+            throw BCError.unexpectedReply(msgId: reply.msgId, code: reply.responseCode, why: "spotlight settings rejected")
         }
     }
 
@@ -692,6 +750,32 @@ enum SpotlightStatus {
             return status != 0
         }
         return nil
+    }
+}
+
+enum FloodlightTaskConfig {
+    /// The text range of the task's own `<enable>`: the first one in the document. Later ones
+    /// belong to nested settings such as `nightLongViewMultiBrightness`, which the camera
+    /// sends after it.
+    private static func enableRange(in xml: String) -> Range<String.Index>? {
+        guard let start = xml.range(of: "<FloodlightTask"),
+              let end = xml.range(of: "</FloodlightTask>", range: start.upperBound..<xml.endIndex),
+              let valueStart = xml.range(of: "<enable>", range: start.upperBound..<end.lowerBound),
+              let valueEnd = xml.range(of: "</enable>", range: valueStart.upperBound..<end.lowerBound) else { return nil }
+        // Must be a direct child: no nested element may open before it.
+        if let nested = xml.range(of: "<nightLongViewMultiBrightness>", range: start.upperBound..<end.lowerBound),
+           nested.lowerBound < valueStart.lowerBound { return nil }
+        return valueStart.upperBound..<valueEnd.lowerBound
+    }
+
+    static func enabled(in xml: String) -> Bool? {
+        enableRange(in: xml).flatMap { Int(xml[$0].trimmingCharacters(in: .whitespaces)) }.map { $0 != 0 }
+    }
+
+    /// Replaces the text of `<FloodlightTask><enable>` and leaves every other byte untouched,
+    /// so the configuration goes back exactly as the camera produced it.
+    static func replacingEnabled(in xml: String, with enabled: Bool) -> String? {
+        enableRange(in: xml).map { xml.replacingCharacters(in: $0, with: enabled ? "1" : "0") }
     }
 }
 
