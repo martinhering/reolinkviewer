@@ -50,6 +50,7 @@ public actor RecordingService {
     private let log: @Sendable (String) -> Void
     private let loadSettings: @Sendable () -> RecordingSettings
     private let loadCameras: @Sendable () -> [RecorderCamera]
+    private let loadStorage: @Sendable () -> StorageSetup?
 
     private struct Running {
         let camera: RecorderCamera
@@ -63,18 +64,26 @@ public actor RecordingService {
     private var lastCleanup = Date.distantPast
     private var awake: NSObjectProtocol?
     private var wasActive: Bool?
+    private var storageStale = true
+    private var storageFingerprint: String?
+    private var uploader: Uploader?
+    private var uploadTask: Task<Void, Never>?
 
     /// - Parameters:
     ///   - loadSettings: called every second; must be cheap.
     ///   - loadCameras: called when recording starts, once a minute while it runs, and after
     ///     `configurationChanged()`. May read the keychain.
+    ///   - loadStorage: called at the start and after `configurationChanged()`; nil while no
+    ///     off-site storage is set up. Kept files then stay on the Mac as they are.
     public init(directory: URL = RecordingStore.defaultDirectory, log: @escaping @Sendable (String) -> Void,
                 loadSettings: @escaping @Sendable () -> RecordingSettings,
-                loadCameras: @escaping @Sendable () -> [RecorderCamera]) {
+                loadCameras: @escaping @Sendable () -> [RecorderCamera],
+                loadStorage: @escaping @Sendable () -> StorageSetup? = { nil }) {
         self.directory = directory
         self.log = log
         self.loadSettings = loadSettings
         self.loadCameras = loadCameras
+        self.loadStorage = loadStorage
     }
 
     /// Runs until the task is cancelled, then stops every recorder and returns.
@@ -85,16 +94,49 @@ public actor RecordingService {
             try? await Task.sleep(for: .seconds(1))
         }
         await reconcile(with: [], parameters: RecordingSettings.Parameters())
+        uploadTask?.cancel()
+        await uploadTask?.value
         allowSleep()
         log("recorder stopped")
     }
 
-    /// The app saved cameras or settings: read the cameras again at the next tick.
+    /// The app saved cameras or settings: read the cameras and the storage again at the next tick.
     public func configurationChanged() {
         camerasLoaded = .distantPast
+        storageStale = true
+    }
+
+    /// Starts, replaces or stops the uploader to match the storage setup.
+    private func reloadStorage() async {
+        storageStale = false
+        let setup = loadStorage()
+        guard setup?.fingerprint != storageFingerprint || (setup != nil) != (uploader != nil) else { return }
+        uploadTask?.cancel()
+        await uploadTask?.value
+        uploadTask = nil
+        uploader = nil
+        storageFingerprint = setup?.fingerprint
+        guard let setup else {
+            log("no off-site storage set up: kept files stay on this Mac")
+            return
+        }
+        let uploader = Uploader(root: directory, setup: setup, log: log)
+        self.uploader = uploader
+        let names = Dictionary(loadCameras().map { ($0.id, $0.name.isEmpty ? $0.host : $0.name) }, uniquingKeysWith: { a, _ in a })
+        await uploader.enqueueLeftovers(cameraNames: names)
+        let waiting = await uploader.pending
+        log("uploading to \(setup.configuration.bucket) at \(setup.configuration.endpoint.host ?? "?")"
+            + (waiting > 0 ? ", \(waiting) waiting" : ""))
+        uploadTask = Task { await uploader.run() }
+    }
+
+    private func kept(_ kept: CameraRecorder.Kept, camera: RecorderCamera) async {
+        await uploader?.enqueue(file: kept.url, camera: camera.id, cameraName: camera.name.isEmpty ? camera.host : camera.name,
+                                start: kept.start, duration: kept.duration, motion: kept.motion)
     }
 
     private func tick(now: Date) async {
+        if storageStale { await reloadStorage() }
         let settings = loadSettings()
         let active = settings.isActive(at: now)
         if active != wasActive {
@@ -143,7 +185,8 @@ public actor RecordingService {
             let name = camera.name.isEmpty ? camera.host : camera.name
             let recorder = CameraRecorder(camera: camera, parameters: parameters,
                                           directory: RecordingStore.directory(for: camera.id, in: directory),
-                                          log: { log("[\(name)] \($0)") })
+                                          log: { log("[\(name)] \($0)") },
+                                          onKept: { [weak self] kept in Task { await self?.kept(kept, camera: camera) } })
             running[camera.id] = Running(camera: camera, parameters: parameters, recorder: recorder)
             recorder.start()
         }

@@ -34,6 +34,27 @@ struct BCTool {
                 i += 1
             }
         }
+        if command == "decrypt" {
+            decryptCommand(options)
+            return
+        }
+        if command == "keyfile" {
+            guard let out = options["out"] else { usage() }
+            guard let passphrase = options["passphrase"] ?? ProcessInfo.processInfo.environment["BC_PASSPHRASE"] else {
+                fail("no passphrase: pass --passphrase or set BC_PASSPHRASE")
+            }
+            do {
+                try Vault.generate().keyFile(passphrase: passphrase).write(to: URL(fileURLWithPath: out))
+                print("new key file written to \(out)")
+            } catch {
+                fail("\(error)")
+            }
+            return
+        }
+        if command == "storage" {
+            await storageCommand(options)
+            return
+        }
         guard let host = options["host"] else { usage() }
         let port = UInt16(options["port"] ?? "9000") ?? 9000
         let user = options["user"] ?? "admin"
@@ -424,6 +445,72 @@ struct BCTool {
         await camera.stopVideo()
     }
 
+    /// Opens a sealed recording, as downloaded from the bucket, with the key file and the passphrase.
+    static func decryptCommand(_ options: [String: String]) {
+        guard let input = options["in"], let keyFilePath = options["key-file"], let name = options["name"] else { usage() }
+        guard let passphrase = options["passphrase"] ?? ProcessInfo.processInfo.environment["BC_PASSPHRASE"] else {
+            fail("no passphrase: pass --passphrase or set BC_PASSPHRASE")
+        }
+        do {
+            let vault = try Vault(keyFile: Data(contentsOf: URL(fileURLWithPath: keyFilePath)), passphrase: passphrase)
+            let clear = try vault.open(Data(contentsOf: URL(fileURLWithPath: input)), name: name)
+            let out = options["out"] ?? (input.hasSuffix(".enc") ? String(input.dropLast(4)) : input + ".clear")
+            try clear.write(to: URL(fileURLWithPath: out))
+            print("opened \(input): \(clear.count) bytes written to \(out)")
+        } catch {
+            fail("\(error is VaultError ? "\(error)" : error.localizedDescription)")
+        }
+    }
+
+    /// Tries the requests the recorder and storage setup make against a bucket, to see
+    /// whether a provider and a key are fit for it.
+    static func storageCommand(_ options: [String: String]) async {
+        guard let endpoint = options["endpoint"], let bucket = options["bucket"], let keyID = options["key-id"] else { usage() }
+        guard let secret = options["secret"] ?? ProcessInfo.processInfo.environment["BC_S3_SECRET"] else {
+            fail("no secret: pass --secret or set BC_S3_SECRET")
+        }
+        var settings = StorageSettings()
+        settings.endpoint = endpoint
+        settings.bucket = bucket
+        settings.region = options["region"] ?? ""
+        guard let configuration = settings.configuration else { fail("not an endpoint: \(endpoint)") }
+        let client = S3Client(configuration: configuration, credentials: S3Credentials(accessKeyID: keyID, secretAccessKey: secret))
+        let key = StorageLayout.recordingsPrefix + "setup-check"
+        func attempt(_ what: String, _ work: () async throws -> String) async {
+            do {
+                print("  \(what): \(try await work())")
+            } catch {
+                print("  \(what): failed, \(error is S3Error ? "\(error)" : error.localizedDescription)")
+            }
+        }
+        print("\(bucket) at \(configuration.endpoint.absoluteString), region \(configuration.region)")
+        await attempt("upload") {
+            try await client.putObject(key: key, data: Data("ok".utf8))
+            return "ok"
+        }
+        await attempt("download") { "\(try await client.getObject(key: key).count) bytes" }
+        await attempt("missing object") {
+            do {
+                _ = try await client.getObject(key: key + "-missing")
+                return "unexpectedly there"
+            } catch let error as S3Error where error.isNotFound {
+                return "reported as missing (\(error.code ?? "404"))"
+            }
+        }
+        if let days = options["lifecycle-days"].flatMap({ Int($0) }) {
+            await attempt("lifecycle rule, \(days) days") {
+                try await client.putLifecycle(expireAfterDays: days, prefix: StorageLayout.recordingsPrefix)
+                return "written (this replaced the bucket's lifecycle rules)"
+            }
+        }
+        if options["delete"] != nil || CommandLine.arguments.contains("--delete") {
+            await attempt("delete") {
+                try await client.deleteObject(key: key)
+                return "allowed (an upload-only key should be refused)"
+            }
+        }
+    }
+
     static func usage() -> Never {
         print("""
         usage:
@@ -450,6 +537,14 @@ struct BCTool {
                                                               with motion; --frame-size judges motion by frame sizes)
           bctool sizes  --host H [--sub] [--seconds 60]      (P-frame bytes per second, the frame-size motion detector
                                                               and the camera's own motion state side by side)
+          bctool decrypt --in FILE.enc --key-file data-key.json --name OBJECT-KEY [--out FILE]
+                                                             (open a recording downloaded from the bucket; OBJECT-KEY is its
+                                                              name there, recordings/<camera>/<day>/<file>; passphrase from
+                                                              --passphrase or BC_PASSPHRASE)
+          bctool keyfile --out data-key.json                 (a new random data key, wrapped with the passphrase; for tests)
+          bctool storage --endpoint E --bucket B --key-id K [--region R] [--lifecycle-days N] [--delete]
+                                                             (try a bucket and a key: upload, download, optionally write the
+                                                              lifecycle rule and try a delete; secret from --secret or BC_S3_SECRET)
           bctool raw    --host H --id N [--no-extension]     (send a request without a body, print the reply)
           bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)
         password: --password or BC_PASSWORD (may be empty for a camera not yet set up)

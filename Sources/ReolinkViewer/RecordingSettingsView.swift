@@ -10,6 +10,8 @@ struct RecordingSettingsView: View {
     @State private var settings = RecordingSettings.load()
     @State private var agentStatus = RecorderAgent.statusText
     @State private var agentError: String?
+    @State private var storage = StorageSettings.load()
+    @State private var settingUpStorage = false
 
     var body: some View {
         Form {
@@ -50,6 +52,22 @@ struct RecordingSettingsView: View {
             }
 
             Section {
+                if storage.isConfigured {
+                    LabeledContent("Bucket", value: "\(storage.bucket) at \(storage.configuration?.endpoint.host ?? storage.endpoint)")
+                    LabeledContent("Deleted there after", value: "\(storage.retentionDays) days")
+                }
+                LabeledContent(storage.isConfigured ? "Keys, retention, passphrase" : "Not set up") {
+                    Button(storage.isConfigured ? "Set Up Again…" : "Set Up…") { settingUpStorage = true }
+                }
+            } header: {
+                Text("Off-site storage")
+            } footer: {
+                footnote(storage.isConfigured
+                         ? "Kept files are encrypted on this Mac and uploaded. The bucket deletes them when the retention period ends."
+                         : "Without off-site storage the kept files stay on this Mac only, unencrypted.")
+            }
+
+            Section {
                 footnote(agentStatus)
                 if let agentError {
                     footnote(agentError).foregroundStyle(.red)
@@ -79,7 +97,14 @@ struct RecordingSettingsView: View {
             SettingsStore.notifyRecorder()
             if new.enabled != old.enabled { updateAgent() }
         }
+        .sheet(isPresented: $settingUpStorage) {
+            StorageSetupView {
+                settingUpStorage = false
+                storage = StorageSettings.load()
+            }
+        }
         .onAppear {
+            storage = StorageSettings.load()
             settings = RecordingSettings.load()
             agentStatus = RecorderAgent.statusText
         }

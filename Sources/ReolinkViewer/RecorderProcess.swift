@@ -14,13 +14,13 @@ enum RecorderProcess {
 
     static func run() -> Never {
         let log = RecorderLog()
-        guard let lock = InstanceLock(name: "recorder.lock") else {
-            log.write("another recorder is already running; leaving")
-            exit(0)
-        }
         var directory = RecordingStore.defaultDirectory
         if let override = ProcessInfo.processInfo.environment["REOLINK_RECORDINGS_DIR"], !override.isEmpty {
             directory = URL(fileURLWithPath: override, isDirectory: true)
+        }
+        guard let lock = InstanceLock(folder: directory) else {
+            log.write("another recorder is already running on \(directory.path); leaving")
+            exit(0)
         }
         let service = RecordingService(
             directory: directory, log: { log.write($0) },
@@ -30,7 +30,8 @@ enum RecorderProcess {
                     RecorderCamera(id: $0.id, name: $0.displayName, host: $0.host, port: $0.port,
                                    username: $0.username, password: $0.password)
                 }
-            })
+            },
+            loadStorage: { StorageStore.loadSetup() })
         let task = Task { await service.run() }
 
         // The app tells us when cameras or settings were saved.
@@ -102,14 +103,14 @@ final class RecorderLog: @unchecked Sendable {
     }
 }
 
-/// A lock file that makes sure only one recorder runs. Held for as long as the object lives.
+/// A lock file that makes sure only one recorder writes to a recordings folder. Held for as
+/// long as the object lives.
 final class InstanceLock {
     private let descriptor: Int32
 
-    init?(name: String) {
-        let folder = RecordingStore.defaultDirectory.deletingLastPathComponent()
+    init?(folder: URL) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let fd = open(folder.appendingPathComponent(name).path, O_CREAT | O_RDWR, 0o644)
+        let fd = open(folder.appendingPathComponent("recorder.lock").path, O_CREAT | O_RDWR, 0o644)
         guard fd >= 0 else { return nil }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)

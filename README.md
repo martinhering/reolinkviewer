@@ -119,10 +119,175 @@ the files in which something moved. The settings apply to all cameras.
   the decision falls 10 s after the file closes, and every other file is deleted. A camera
   that pushes no motion events is judged by the size of its predicted frames instead.
 - **Clean-up:** kept files are deleted from the Mac after 2 days (adjustable).
-- **Log:** `~/Library/Logs/ReolinkViewer/recorder.log` says what was kept and deleted.
+- **Log:** `~/Library/Logs/ReolinkViewer/recorder.log` says what was kept, deleted and uploaded.
 
-Uploading the kept files to off-site storage, encrypted, and playing them back in the app
-are planned; see [RECORDING_PLAN.md](RECORDING_PLAN.md).
+### Off-site storage
+
+**Set Up…** under *Off-site storage* sends the kept files to a bucket at any S3-compatible
+service. Without it they stay on the Mac, unencrypted.
+
+- **Encryption:** each file is sealed on the Mac with AES-256-GCM before it is uploaded, so
+  the provider holds only ciphertext. The key is random; the bucket holds it wrapped with
+  your passphrase (`keys/data-key.json`). Setup can generate the passphrase and shows it
+  once: keep a copy outside the Mac, or a lost Mac means lost recordings.
+- **Two keys:** the *upload key* is stored in the keychain and used by the recorder; give it
+  the right to upload and nothing else. The *setup key* is used during setup only: it reads
+  and writes the key file and writes the bucket's lifecycle rule.
+- **Retention:** the bucket deletes recordings itself after the period chosen in setup (14
+  days by default), through a lifecycle rule on the `recordings/` prefix. Writing it replaces
+  the lifecycle rules the bucket had. To change the period, run setup again.
+- **Outages:** uploads are queued on disk and catch up when the connection is back. The
+  sealed files stay on the Mac for the clean-up period as a cache.
+- **In the bucket:** `recordings/<camera id>/yyyy-MM-dd/HHmmssZ_60s.mp4.enc`, and one sealed
+  index per day, `recordings/index/yyyy-MM-dd.json.enc`, listing every camera's files and
+  motion times. The provider sees names, sizes and upload times, not the content.
+
+`bctool storage` tries a bucket and a key before you commit to a provider, and
+`bctool decrypt` opens a downloaded file with the key file and the passphrase.
+
+### Setting up Amazon S3
+
+The steps use the [AWS CLI](https://aws.amazon.com/cli/) with an administrator profile; the
+console does the same under S3 and IAM. Replace `my-cams` and `eu-central-1` with your
+bucket name and region. The bucket name must not contain dots.
+
+**1. Create the bucket.** New buckets are private; the second command makes sure it stays so.
+
+```sh
+aws s3api create-bucket --bucket my-cams --region eu-central-1 \
+    --create-bucket-configuration LocationConstraint=eu-central-1
+aws s3api put-public-access-block --bucket my-cams --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+```
+
+(In `us-east-1`, leave out `--create-bucket-configuration`.)
+
+**2. Create the upload user.** It may write below `recordings/` and nothing else: no
+reading, no listing, no deleting.
+
+```sh
+aws iam create-user --user-name my-cams-upload
+aws iam put-user-policy --user-name my-cams-upload --policy-name upload --policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "s3:PutObject",
+    "Resource": "arn:aws:s3:::my-cams/recordings/*"
+  }]
+}'
+aws iam create-access-key --user-name my-cams-upload
+```
+
+Note the `AccessKeyId` and `SecretAccessKey` it prints: this is the *upload key*.
+
+**3. Create the setup user.** It reads and writes the key file and writes the lifecycle
+rule. It needs `s3:ListBucket` so that S3 reports a missing key file as missing instead of
+as forbidden.
+
+```sh
+aws iam create-user --user-name my-cams-setup
+aws iam put-user-policy --user-name my-cams-setup --policy-name setup --policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::my-cams/keys/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:PutLifecycleConfiguration"],
+      "Resource": "arn:aws:s3:::my-cams"
+    }
+  ]
+}'
+aws iam create-access-key --user-name my-cams-setup
+```
+
+This is the *setup key*.
+
+**4. Check the upload key** before entering anything in the app:
+
+```sh
+swift build --product bctool
+BC_S3_SECRET='<upload secret>' .build/debug/bctool storage --endpoint s3.eu-central-1.amazonaws.com \
+    --region eu-central-1 --bucket my-cams --key-id '<upload key id>' --delete
+```
+
+The upload must succeed; the download and the delete must fail with `403 AccessDenied`.
+If the delete is allowed, the key is too strong.
+
+**5. Run storage setup** in the app, **Settings › Recording › Set Up…**:
+
+| Field | Value |
+| --- | --- |
+| Endpoint | `s3.eu-central-1.amazonaws.com` (the regional endpoint, not `s3.amazonaws.com`) |
+| Region | `eu-central-1` |
+| Bucket | `my-cams` |
+| Upload key | from step 2 |
+| Setup key | from step 3 |
+| Delete recordings after | 14 days, or what you want |
+| Write the bucket's lifecycle rule | on |
+| Passphrase | empty to have one generated; it is shown once, save it in a password manager |
+
+Then check what setup wrote:
+
+```sh
+aws s3api get-bucket-lifecycle-configuration --bucket my-cams   # one rule: prefix recordings/, 14 days
+aws s3 ls s3://my-cams/keys/                                    # data-key.json
+```
+
+**6. Retire the setup key.** It is not stored on the Mac and not needed again until you
+change the retention period:
+
+```sh
+aws iam delete-access-key --user-name my-cams-setup --access-key-id '<setup key id>'
+```
+
+For the next setup run, make a new one with `aws iam create-access-key`.
+
+**Optional: protect against overwriting.** The upload key cannot delete, but it can upload a
+new object under an existing name. With versioning the old version survives that:
+
+```sh
+aws s3api put-bucket-versioning --bucket my-cams --versioning-configuration Status=Enabled
+```
+
+A versioned bucket needs a lifecycle rule that also removes old versions, which the app
+does not write. Switch *Write the bucket's lifecycle rule* off in setup and set the rule
+yourself:
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket my-cams --lifecycle-configuration '{
+  "Rules": [{
+    "ID": "reolinkviewer-retention",
+    "Status": "Enabled",
+    "Filter": {"Prefix": "recordings/"},
+    "Expiration": {"Days": 14},
+    "NoncurrentVersionExpiration": {"NoncurrentDays": 14}
+  }, {
+    "ID": "reolinkviewer-cleanup",
+    "Status": "Enabled",
+    "Filter": {"Prefix": "recordings/"},
+    "Expiration": {"ExpiredObjectDeleteMarker": true},
+    "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+  }]
+}'
+```
+
+**Moving from another provider.** Setup makes a new encryption key for a bucket that has no
+key file, and replaces this Mac's copy of the old one. To keep one key for both, copy
+`keys/data-key.json` from the old bucket into the new one before running setup, and enter
+the old passphrase:
+
+```sh
+aws s3 cp s3://old-bucket/keys/data-key.json . --endpoint-url https://<old endpoint>   # with the old provider's key
+aws s3 cp data-key.json s3://my-cams/keys/data-key.json                                # with an AWS administrator profile
+```
+
+Recordings already in the old bucket stay there until its own lifecycle rule deletes them.
+
+Playing the recordings back in the app is planned; see [RECORDING_PLAN.md](RECORDING_PLAN.md).
 
 ## Command-line tool
 
@@ -152,6 +317,10 @@ export BC_PASSWORD='…'
 .build/debug/bctool record   --host 192.168.1.20 --out rec --seconds 180   # 1-minute MP4 files, no re-encoding
 .build/debug/bctool recorder --host 192.168.1.20 --out rec --seconds 600   # as the background recorder: keeps only files with motion
 .build/debug/bctool sizes    --host 192.168.1.20 --seconds 60     # frame-size motion detection next to the camera's own
+BC_S3_SECRET=… .build/debug/bctool storage --endpoint s3.example.com --bucket cams --key-id K --delete
+                                                                  # can this key upload and download? may it delete?
+BC_PASSPHRASE=… .build/debug/bctool decrypt --in 135400Z_60s.mp4.enc --key-file data-key.json \
+    --name recordings/<camera id>/2026-11-19/135400Z_60s.mp4.enc  # open a file downloaded from the bucket
 ```
 
 For a camera that has no password yet, pass `--password` with no value.
@@ -285,12 +454,14 @@ it, port it or compare against another camera.
 ```
 Sources/Baichuan/       protocol library (pure Swift, no dependencies)
 Sources/CameraMedia/    sample buffers from the camera's frames, MP4 segment recorder
-Sources/Recording/      the background recorder: daily window, motion log, keep rule, local folder
+Sources/Recording/      the background recorder: daily window, motion log, keep rule, local folder,
+                        encryption, S3 client and upload queue
 Sources/bctool/         command-line client
 Sources/ReolinkViewer/  the SwiftUI app
 Tests/BaichuanTests/    unit tests for framing, crypto, XML and media parsing
 Tests/CameraMediaTests/ unit tests for the sample builders and the segment recorder
-Tests/RecordingTests/   unit tests for the window, the keep rule and the clean-up
+Tests/RecordingTests/   unit tests for the window, the keep rule, the clean-up, encryption,
+                        request signing (AWS's worked examples) and the upload queue
 AppIcon.icon            app icon, an Icon Composer document (SF Symbol camera.fill on blue)
 build-app.sh            builds, signs and notarizes build/ReolinkViewer.app
 ```
@@ -328,7 +499,9 @@ REOLINK_RECORDINGS_DIR=/tmp/rec build/ReolinkViewer.app/Contents/MacOS/ReolinkVi
 
 It reads the cameras from the app's preferences, so use the binary inside the built app;
 the one in `.build` has preferences of its own. Equal start and stop times mean the whole
-day. Only one recorder runs at a time.
+day. Only one recorder runs per recordings folder. For the storage, `-storage.endpoint`,
+`-storage.bucket` and `-storage.uploadKeyID` work the same way, and `REOLINK_S3_SECRET`,
+`REOLINK_PASSPHRASE` and `REOLINK_KEY_FILE` stand in for the keychain and the key file.
 
 ### App icon
 
