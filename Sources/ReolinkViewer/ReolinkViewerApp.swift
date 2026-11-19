@@ -1,6 +1,16 @@
 import SwiftUI
 
+/// One binary, two roles: the viewer app, or with `--recorder` the background recorder.
 @main
+enum Main {
+    static func main() {
+        if CommandLine.arguments.contains(RecorderProcess.argument) {
+            RecorderProcess.run()
+        }
+        ReolinkViewerApp.main()
+    }
+}
+
 struct ReolinkViewerApp: App {
     @StateObject private var store = CameraStore()
 
@@ -18,8 +28,13 @@ struct ReolinkViewerApp: App {
         }
 
         Settings {
-            SettingsView()
-                .environmentObject(store)
+            TabView {
+                SettingsView()
+                    .tabItem { Label("Cameras", systemImage: "video") }
+                RecordingSettingsView()
+                    .tabItem { Label("Recording", systemImage: "record.circle") }
+            }
+            .environmentObject(store)
         }
     }
 }

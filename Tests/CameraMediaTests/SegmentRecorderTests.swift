@@ -82,7 +82,7 @@ final class SegmentRecorderTests: XCTestCase {
                 : .videoFrame(codec: codec, data: frame.data, microseconds: micros)
             if let closed = try await recorder.append(item) { segments.append(closed) }
         }
-        if let last = try await recorder.finish() { segments.append(last) }
+        segments += try await recorder.finish()
         XCTAssertEqual(recorder.discontinuities, 0)
         return segments
     }
@@ -186,15 +186,60 @@ final class SegmentRecorderTests: XCTestCase {
         XCTAssertEqual(duration.seconds, 2.0, accuracy: 0.05)
     }
 
-    func testStartsWithoutSoundWhenTheCameraSendsNone() async throws {
-        // 4 s of video and no audio frame: the first 3 s are spent waiting for one.
-        let video = try TestStream.video(codec: .h264, count: 100)
+    func testNoAudioTrackWhenTheCameraSendsNoSound() async throws {
+        let video = try TestStream.video(codec: .h264, count: 50)
         let segments = try await record(video, codec: .h264, start: tenOClock, segmentLength: 60)
         XCTAssertEqual(segments.count, 1)
         XCTAssertEqual(segments[0].audioFrames, 0)
-        XCTAssertEqual(segments[0].videoFrames, 20)  // from the key frame at 3.2 s
+        XCTAssertEqual(segments[0].videoFrames, 50)
         let audioTracks = try await AVURLAsset(url: segments[0].url).loadTracks(withMediaType: .audio)
         XCTAssertTrue(audioTracks.isEmpty)
+    }
+
+    func testSurvivesSoundThatStopsWhileThePictureGoesOn() async throws {
+        // A camera on a weak link: 20 s of video, but only the first second of audio arrives.
+        let video = try TestStream.video(codec: .h264, count: 500)
+        let audio = try TestStream.audio(frames: 16)
+        let segments = try await record(video, codec: .h264, audio: audio, start: tenOClock, segmentLength: 60)
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments[0].videoFrames, 500)
+        XCTAssertEqual(segments[0].audioFrames, 15)  // the one before the first picture has no time yet
+        let asset = AVURLAsset(url: segments[0].url)
+        let pictures = try await decodedSampleCount(asset, .video)
+        XCTAssertEqual(pictures, 500)
+        let duration = try await asset.load(.duration)
+        XCTAssertEqual(duration.seconds, 20.0, accuracy: 0.05)
+    }
+
+    func testSurvivesAHoleInTheSound() async throws {
+        // Sound for 1 s, nothing for 18 s, then sound again: the audio clock lines up with the video.
+        let video = try TestStream.video(codec: .h264, count: 500)
+        let audio = try TestStream.audio(frames: 32)
+        let clock = Clock(tenOClock)
+        let recorder = SegmentRecorder(directory: directory, segmentLength: 60) { clock.date }
+        var sent = 0
+        for (i, frame) in video.enumerated() {
+            let elapsed = Double(i) / 25
+            clock.date = tenOClock.addingTimeInterval(elapsed)
+            let micros = UInt32(5_000_000 + i * 40_000)
+            try await recorder.append(frame.isKeyFrame ? .videoKeyFrame(codec: .h264, data: frame.data, microseconds: micros, time: nil)
+                                                       : .videoFrame(codec: .h264, data: frame.data, microseconds: micros))
+            let audible = elapsed < 1 || elapsed >= 19
+            if audible, sent < audio.count, i % 2 == 0 {
+                try await recorder.append(.aac(audio[sent]))
+                sent += 1
+            }
+        }
+        let segments = try await recorder.finish()
+        XCTAssertEqual(segments.count, 1)
+        // 18 s of silence at 64 ms a frame fill the hole.
+        XCTAssertEqual(Double(segments[0].audioFrames - sent), 18 / 0.064, accuracy: 10)
+        let asset = AVURLAsset(url: segments[0].url)
+        let pictures = try await decodedSampleCount(asset, .video)
+        XCTAssertEqual(pictures, 500)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        let range = try await XCTUnwrap(tracks.first).load(.timeRange)
+        XCTAssertGreaterThan(range.end.seconds, 19, "the late sound sits at the end of the file, not right after the early sound")
     }
 }
 

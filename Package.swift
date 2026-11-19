@@ -15,11 +15,15 @@ let package = Package(
         // CoreMedia glue shared by the app and bctool: sample buffers from the camera's
         // frames, and the MP4 segment recorder.
         .target(name: "CameraMedia", dependencies: ["Baichuan"]),
+        // The background recorder: daily window, motion log, keep rule, local folder.
+        .target(name: "Recording", dependencies: ["Baichuan", "CameraMedia"]),
         // Command-line test harness: login, stream dump, PTZ, motion events, recording.
-        .executableTarget(name: "bctool", dependencies: ["Baichuan", "CameraMedia"]),
-        // SwiftUI viewer app.
-        .executableTarget(name: "ReolinkViewer", dependencies: ["Baichuan", "CameraMedia"], exclude: ["Info.plist"]),
+        .executableTarget(name: "bctool", dependencies: ["Baichuan", "CameraMedia", "Recording"]),
+        // SwiftUI viewer app; with --recorder the same binary is the background recorder.
+        .executableTarget(name: "ReolinkViewer", dependencies: ["Baichuan", "CameraMedia", "Recording"],
+                          exclude: ["Info.plist", "RecorderAgent.plist"]),
         .testTarget(name: "BaichuanTests", dependencies: ["Baichuan"]),
         .testTarget(name: "CameraMediaTests", dependencies: ["CameraMedia"]),
+        .testTarget(name: "RecordingTests", dependencies: ["Recording"]),
     ]
 )

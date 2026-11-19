@@ -1,6 +1,7 @@
 import Baichuan
 import CameraMedia
 import Foundation
+import Recording
 
 /// Command-line harness for the Baichuan library.
 ///
@@ -9,6 +10,7 @@ import Foundation
 ///   bctool ptz    --host H --dir left|right|up|down [--speed 32] [--ms 500]
 ///   bctool events --host H [--seconds 60]
 ///   bctool record --host H --out DIR [--sub] [--seconds 180] [--segment 60] [--no-audio]
+///   bctool recorder --host H --out DIR [--seconds 180] [--segment 60] [--frame-size]
 ///
 /// The password comes from --password or the BC_PASSWORD environment variable.
 @main
@@ -189,6 +191,31 @@ struct BCTool {
                                         seconds: Double(options["seconds"] ?? "180") ?? 180,
                                         segmentLength: Double(options["segment"] ?? "60") ?? 60,
                                         audio: !flags.contains("no-audio"))
+            case "sizes":
+                try await sizesCommand(camera: camera, kind: flags.contains("sub") ? .sub : .main,
+                                       seconds: Double(options["seconds"] ?? "60") ?? 60)
+            case "recorder":
+                guard let out = options["out"] else { usage() }
+                await camera.disconnect()  // the recorder holds its own connection
+                var parameters = RecordingSettings.Parameters()
+                parameters.stream = flags.contains("sub") ? .sub : .main
+                parameters.audio = !flags.contains("no-audio")
+                parameters.keep = flags.contains("keep-all") ? .everything : .motionOnly
+                parameters.segmentLength = Int(options["segment"] ?? "60") ?? 60
+                parameters.paddingBefore = Int(options["before"] ?? "10") ?? 10
+                parameters.paddingAfter = Int(options["after"] ?? "20") ?? 20
+                let recorder = CameraRecorder(
+                    camera: RecorderCamera(id: UUID(), name: host, host: host, port: port, username: user, password: password),
+                    parameters: parameters, directory: URL(fileURLWithPath: out, isDirectory: true),
+                    forceFrameSizeDetection: flags.contains("frame-size"), log: { print("  \(clock())  \($0)") })
+                let seconds = Double(options["seconds"] ?? "180") ?? 180
+                print("recorder running for \(Int(seconds)) s, keeping "
+                      + (parameters.keep == .everything ? "everything" : "segments with motion") + ", Ctrl-C to stop")
+                recorder.start()
+                let interrupt = Interrupt()
+                let deadline = Date().addingTimeInterval(seconds)
+                while Date() < deadline, !interrupt.fired { try await Task.sleep(for: .milliseconds(200)) }
+                await recorder.stop()
             default:
                 usage()
             }
@@ -217,7 +244,17 @@ struct BCTool {
         var firstFrameAt: Date? = nil
         let deadline = Date().addingTimeInterval(seconds)
         let t0 = Date()
+        let trace = ProcessInfo.processInfo.environment["BC_TRACE"] != nil
         for try await frame in stream {
+            if trace {
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                switch frame {
+                case .videoKeyFrame(_, let data, let micros, _): print("\(ms) K \(micros) \(data.count)")
+                case .videoFrame(_, let data, let micros): print("\(ms) P \(micros) \(data.count)")
+                case .aac(let data): print("\(ms) A - \(data.count)")
+                default: break
+                }
+            }
             switch frame {
             case .info(let w, let h, let fps):
                 print("  info: \(w)x\(h) @ \(fps) fps")
@@ -353,11 +390,38 @@ struct BCTool {
         } catch {
             failure = error
         }
-        if let segment = try await recorder.finish() { report(segment) }
+        for segment in try await recorder.finish() { report(segment) }
         if let failure { throw failure }
         await camera.stopVideo()
         print("recording stopped, \(files) file\(files == 1 ? "" : "s")"
               + (recorder.discontinuities > 0 ? ", \(recorder.discontinuities) time stamp jumps" : ""))
+    }
+
+    /// Prints, second by second, what the frame-size motion detector sees next to what the
+    /// camera's own detector reports. For judging the fallback on a given camera.
+    static func sizesCommand(camera: BaichuanCamera, kind: StreamKind, seconds: Double) async throws {
+        let cameraMotion = Counter()
+        await camera.setMotionHandler { event in cameraMotion.set(event.isMotion ? 1 : 0) }
+        let events = (try? await camera.startMotionEvents()) != nil
+        let stream = try await camera.startVideo(kind)
+        print("time      P bytes/s  baseline  frame sizes  camera" + (events ? "" : " (pushes no events)"))
+        var detector = FrameSizeMotionDetector()
+        let deadline = Date().addingTimeInterval(seconds)
+        var second = Date()
+        var bytes = 0
+        for try await frame in stream {
+            let now = Date()
+            _ = detector.add(frame, at: now)
+            if case .videoFrame(_, let data, _) = frame { bytes += data.count }
+            if now.timeIntervalSince(second) >= 1 {
+                print(String(format: "%@  %9d  %8.0f  %@  %@", String(clock(now).prefix(8)), bytes, detector.baseline ?? 0,
+                             detector.isMotion ? "motion     " : "-          ", cameraMotion.value == 1 ? "motion" : "-"))
+                second = now
+                bytes = 0
+            }
+            if now >= deadline { break }
+        }
+        await camera.stopVideo()
     }
 
     static func usage() -> Never {
@@ -380,6 +444,12 @@ struct BCTool {
           bctool events --host H [--seconds 60]              (ask for motion events and print them; --verbose dumps the XML)
           bctool record --host H --out DIR [--sub] [--seconds 180] [--segment 60] [--no-audio]
                                                              (MP4 files cut on the wall clock, no re-encoding; prints motion events)
+          bctool recorder --host H --out DIR [--seconds 180] [--segment 60] [--before 10] [--after 20]
+                          [--sub] [--no-audio] [--keep-all] [--frame-size]
+                                                             (the background recorder for one camera: keeps only segments
+                                                              with motion; --frame-size judges motion by frame sizes)
+          bctool sizes  --host H [--sub] [--seconds 60]      (P-frame bytes per second, the frame-size motion detector
+                                                              and the camera's own motion state side by side)
           bctool raw    --host H --id N [--no-extension]     (send a request without a body, print the reply)
           bctool passwd --host H --new P [--for admin]       (change a password, then log in with it)
         password: --password or BC_PASSWORD (may be empty for a camera not yet set up)
@@ -402,6 +472,11 @@ final class Counter: @unchecked Sendable {
     func increment() {
         lock.lock(); defer { lock.unlock() }
         count += 1
+    }
+
+    func set(_ value: Int) {
+        lock.lock(); defer { lock.unlock() }
+        count = value
     }
 
     var value: Int {

@@ -24,6 +24,8 @@ commands while you hold an arrow button or key.
 - A switch for whether the spotlight comes on by itself when the camera sees motion in the dark
 - Switches for the camera's network services (ONVIF, RTSP, RTMP, HTTP, HTTPS) in Settings
 - Automatic reconnection when the camera drops the connection or stops sending frames
+- Motion-triggered recording of all cameras during a daily time window, by a background
+  recorder that runs while the app is closed; see [Recording](#recording)
 - Credentials stay in your login keychain; nothing about your cameras is baked into the app
 - `Baichuan`, a pure-Swift package implementing the protocol with no third-party
   dependencies, and `bctool`, a command-line client for scripting and experiments
@@ -98,6 +100,30 @@ is written to the camera at once.
 - **Reconnect** (⌘R) restarts the connection by hand, for every camera on screen. The app
   also does this by itself when a camera drops the connection or stops sending frames.
 
+## Recording
+
+**Settings › Recording** records every camera during a daily time window and keeps only
+the files in which something moved. The settings apply to all cameras.
+
+- **The recorder** is the app itself, started without a window (`ReolinkViewer --recorder`).
+  Switching *Record all cameras* on registers it as a login item, so macOS starts it at
+  login and keeps it running while the app is closed. It keeps the Mac awake during the
+  window and is idle outside it. This needs the built app (`build-app.sh`), signed with a
+  certificate; see [Signing](#signing-and-notarizing-a-release).
+- **Files** are MP4, one per minute, cut at the first key frame after each full minute and
+  written without re-encoding, with sound. They are in
+  `~/Library/Application Support/ReolinkViewer/Recordings/<camera id>/yyyy-MM-dd/HHmmssZ_60s.mp4`,
+  named after their start time in UTC.
+- **Motion** comes from the camera's own detector, so its sensitivity and zones are set on
+  the camera. A file is kept if motion, widened by 10 s before and 20 s after, touches it;
+  the decision falls 10 s after the file closes, and every other file is deleted. A camera
+  that pushes no motion events is judged by the size of its predicted frames instead.
+- **Clean-up:** kept files are deleted from the Mac after 2 days (adjustable).
+- **Log:** `~/Library/Logs/ReolinkViewer/recorder.log` says what was kept and deleted.
+
+Uploading the kept files to off-site storage, encrypted, and playing them back in the app
+are planned; see [RECORDING_PLAN.md](RECORDING_PLAN.md).
+
 ## Command-line tool
 
 `bctool` exercises the library without the UI. The password comes from `--password` or
@@ -124,6 +150,8 @@ export BC_PASSWORD='…'
 .build/debug/bctool passwd   --host 192.168.1.20 --new 'secret'   # change the password, then log in with it
 .build/debug/bctool events   --host 192.168.1.20 --seconds 60     # ask for motion events and print them
 .build/debug/bctool record   --host 192.168.1.20 --out rec --seconds 180   # 1-minute MP4 files, no re-encoding
+.build/debug/bctool recorder --host 192.168.1.20 --out rec --seconds 600   # as the background recorder: keeps only files with motion
+.build/debug/bctool sizes    --host 192.168.1.20 --seconds 60     # frame-size motion detection next to the camera's own
 ```
 
 For a camera that has no password yet, pass `--password` with no value.
@@ -257,10 +285,12 @@ it, port it or compare against another camera.
 ```
 Sources/Baichuan/       protocol library (pure Swift, no dependencies)
 Sources/CameraMedia/    sample buffers from the camera's frames, MP4 segment recorder
+Sources/Recording/      the background recorder: daily window, motion log, keep rule, local folder
 Sources/bctool/         command-line client
 Sources/ReolinkViewer/  the SwiftUI app
 Tests/BaichuanTests/    unit tests for framing, crypto, XML and media parsing
 Tests/CameraMediaTests/ unit tests for the sample builders and the segment recorder
+Tests/RecordingTests/   unit tests for the window, the keep rule and the clean-up
 AppIcon.icon            app icon, an Icon Composer document (SF Symbol camera.fill on blue)
 build-app.sh            builds, signs and notarizes build/ReolinkViewer.app
 ```
@@ -287,6 +317,18 @@ REOLINK_DEBUG=1 REOLINK_PASSWORD='…' .build/debug/ReolinkViewer
 ```
 
 For protocol work, `bctool … --verbose` prints every packet in both directions.
+
+The background recorder runs from Terminal too. Settings can be overridden on the command
+line, and `REOLINK_RECORDINGS_DIR` sends the files somewhere else:
+
+```sh
+REOLINK_RECORDINGS_DIR=/tmp/rec build/ReolinkViewer.app/Contents/MacOS/ReolinkViewer --recorder \
+    -recording.enabled YES -recording.startMinute 0 -recording.stopMinute 0 -recording.segmentLength 20
+```
+
+It reads the cameras from the app's preferences, so use the binary inside the built app;
+the one in `.build` has preferences of its own. Equal start and stop times mean the whole
+day. Only one recorder runs at a time.
 
 ### App icon
 

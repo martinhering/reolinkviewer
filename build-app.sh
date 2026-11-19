@@ -38,6 +38,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ReolinkViewer"
 cp Sources/ReolinkViewer/Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+# The LaunchAgent that starts the background recorder at login; the app registers it with
+# SMAppService when recording is switched on.
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp Sources/ReolinkViewer/RecorderAgent.plist "$APP/Contents/Library/LaunchAgents/com.martinhering.ReolinkViewer.recorder.plist"
 
 # App icon: AppIcon.icon (Icon Composer document) → Assets.car (layered icon for macOS 26)
 # plus AppIcon.icns (flattened fallback for older systems). Info.plist already names "AppIcon".

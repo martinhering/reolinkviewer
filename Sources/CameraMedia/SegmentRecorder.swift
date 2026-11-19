@@ -6,13 +6,13 @@ import Foundation
 public enum RecordingError: Error, CustomStringConvertible {
     case cannotCreateWriter(String)
     case writerFailed(String)
-    case writerStalled
+    case writerStalled(String)
 
     public var description: String {
         switch self {
         case .cannotCreateWriter(let why): return "cannot create the MP4 writer: \(why)"
         case .writerFailed(let why): return "writing the MP4 file failed: \(why)"
-        case .writerStalled: return "the MP4 writer accepted no data for 2 s"
+        case .writerStalled(let what): return "the MP4 writer stopped accepting data at \(what)"
         }
     }
 }
@@ -23,6 +23,10 @@ public enum RecordingError: Error, CustomStringConvertible {
 /// `segmentLength` closes the running file and opens the next one, so every camera cuts at
 /// the same moments and each file starts with a key frame. They are named
 /// `<directory>/yyyy-MM-dd/HHmmssZ_<length>s.mp4` after their start time in UTC.
+///
+/// A file's frames are held in memory and written when it closes. A camera on a weak link
+/// drops audio for seconds at a time, and a writer fed as the frames arrive then holds the
+/// video back until the audio catches up, which it never does.
 ///
 /// Feed it every frame of one stream in order, from one task.
 public final class SegmentRecorder {
@@ -57,17 +61,14 @@ public final class SegmentRecorder {
     private var frameDuration: Int64 = 40_000
     /// A wall-clock time and the stream time that belongs to it.
     private var anchor: (wall: Date, time: Int64)?
-    private var firstVideoAt: Date?
     /// Presentation time of the next audio frame, in samples.
     private var nextAudioSample: Int64?
     private var current: OpenSegment?
+    /// Closed by an `append` that then threw, so it could not return them.
+    private var unreported: [Segment] = []
 
     /// Time stamps that jumped backwards or more than 10 s ahead.
     public private(set) var discontinuities = 0
-
-    /// How long to hold back the first file while no audio frame has arrived, so that it gets
-    /// an audio track.
-    static let audioWait: TimeInterval = 3
 
     /// - Parameters:
     ///   - segmentLength: seconds per file; cuts fall on multiples of it since 1970 (so 60
@@ -89,7 +90,7 @@ public final class SegmentRecorder {
         case .videoFrame(let codec, let data, let micros):
             return try await appendVideo(codec: codec, data: data, micros: micros, isKeyFrame: false)
         case .aac(let data):
-            if recordAudio { try await appendAudio(data) }
+            if recordAudio { appendAudio(data) }
             return nil
         case .info, .adpcm:
             return nil
@@ -98,11 +99,18 @@ public final class SegmentRecorder {
 
     /// Closes the running file. The recorder can be fed again afterwards and then starts a new
     /// file at the next key frame.
+    ///
+    /// Returns the files not reported yet: the running one and, after `append` threw, one it
+    /// had just closed.
     @discardableResult
-    public func finish() async throws -> Segment? {
-        guard let segment = current else { return nil }
-        current = nil
-        return try await segment.finish(at: streamTime + frameDuration)
+    public func finish() async throws -> [Segment] {
+        var segments = unreported
+        unreported = []
+        if let segment = current {
+            current = nil
+            segments.append(try await segment.finish(at: streamTime + frameDuration))
+        }
+        return segments
     }
 
     // MARK: Video
@@ -110,7 +118,6 @@ public final class SegmentRecorder {
     private func appendVideo(codec: VideoCodec, data: Data, micros: UInt32, isKeyFrame: Bool) async throws -> Segment? {
         advanceStreamTime(to: micros)
         let wall = wallClock(for: streamTime)
-        if firstVideoAt == nil { firstVideoAt = wall }
         guard let unit = video.accessUnit(codec: codec, data: data, isKeyFrame: isKeyFrame) else { return nil }
 
         var closed: Segment? = nil
@@ -118,22 +125,27 @@ public final class SegmentRecorder {
             current = nil
             closed = try await segment.finish(at: streamTime)
         }
+        do {
+            try await write(unit, codec: codec, wall: wall)
+        } catch {
+            if let closed { unreported.append(closed) }
+            throw error
+        }
+        return closed
+    }
+
+    /// Opens a file if none is running and this is a key frame, then writes the frame.
+    private func write(_ unit: VideoSampleBuilder.AccessUnit, codec: VideoCodec, wall: Date) async throws {
         if current == nil {
-            guard unit.isKeyFrame else { return closed }
-            // Without an audio format there is no audio track; give the first frames a moment to arrive.
-            if recordAudio, audio.formatDescription == nil, let first = firstVideoAt,
-               wall.timeIntervalSince(first) < Self.audioWait {
-                return closed
-            }
-            current = try OpenSegment(url: url(for: wall), start: wall, slot: slot(of: wall), startTime: streamTime, codec: codec,
-                                      video: unit.format, audio: recordAudio ? audio.formatDescription : nil)
+            guard unit.isKeyFrame else { return }
+            current = OpenSegment(url: url(for: wall), start: wall, slot: slot(of: wall), startTime: streamTime, codec: codec,
+                                  video: unit.format)
         }
         guard let segment = current,
               let sample = VideoSampleBuilder.sampleBuffer(unit, presentationTime: CMTime(value: streamTime, timescale: 1_000_000)) else {
-            return closed
+            return
         }
-        try await segment.append(video: sample, isKeyFrame: unit.isKeyFrame)
-        return closed
+        segment.append(video: sample, isKeyFrame: unit.isKeyFrame)
     }
 
     private func advanceStreamTime(to micros: UInt32) {
@@ -178,53 +190,77 @@ public final class SegmentRecorder {
 
     // MARK: Audio
 
-    private func appendAudio(_ adts: Data) async throws {
+    private func appendAudio(_ adts: Data) {
         // Audio frames carry no time stamp. They follow each other without gaps, so count
         // samples, starting from the video time at which the first one arrived.
-        guard lastMicros != nil, let segment = current, segment.audioFormat != nil else {
-            audio.noteFormat(adts: adts)
+        guard audio.noteFormat(adts: adts), lastMicros != nil, let segment = current else {
             nextAudioSample = nil
             return
         }
-        guard audio.noteFormat(adts: adts) else { return }
         let rate = audio.sampleRate
         let videoSample = Int64((Double(streamTime) / 1_000_000 * rate).rounded())
         var position = nextAudioSample ?? videoSample
         // Lost frames or a restarted stream: line up with the video again.
-        if abs(position - videoSample) > Int64(rate / 2) { position = videoSample }
-        nextAudioSample = position + Int64(AudioSampleBuilder.samplesPerFrame)
-        guard let format = audio.formatDescription, CFEqual(format, segment.audioFormat),
-              let sample = audio.sampleBuffer(adts: adts, presentationTime: CMTime(value: position, timescale: CMTimeScale(rate))) else {
-            return  // the format changed; the next file picks it up
+        if abs(position - videoSample) > Int64(rate / 2) {
+            // An MP4 audio track has no gaps: fill the hole with silence, or the sound after
+            // it would play early.
+            let frame = Int64(AudioSampleBuilder.samplesPerFrame)
+            var fill = max(position, Int64((Double(segment.startTime) / 1_000_000 * rate).rounded()))
+            while segment.hasAudio, fill + frame <= videoSample,
+                  let silent = audio.silentSampleBuffer(presentationTime: CMTime(value: fill, timescale: CMTimeScale(rate))) {
+                segment.append(audio: silent)
+                fill += frame
+            }
+            // After filling, the next frame follows the silence; otherwise it starts at the video's time.
+            position = fill > position && fill <= videoSample ? fill : videoSample
         }
-        try await segment.append(audio: sample)
+        nextAudioSample = position + Int64(AudioSampleBuilder.samplesPerFrame)
+        if let sample = audio.sampleBuffer(adts: adts, presentationTime: CMTime(value: position, timescale: CMTimeScale(rate))) {
+            segment.append(audio: sample)
+        }
     }
 }
 
-/// One MP4 file being written.
+/// One MP4 file: collects the frames, then writes them all when the file closes.
 private final class OpenSegment {
     let url: URL
     let start: Date
     let slot: Int64
     let startTime: Int64
     let codec: VideoCodec
-    let audioFormat: CMAudioFormatDescription?
-    private let size: CMVideoDimensions
-    private let writer: AVAssetWriter
-    private let videoInput: AVAssetWriterInput
-    private let audioInput: AVAssetWriterInput?
-    private var videoFrames = 0
+    private let videoFormat: CMVideoFormatDescription
+    private var audioFormat: CMAudioFormatDescription?
+    private var video: [CMSampleBuffer] = []
+    private var audio: [CMSampleBuffer] = []
     private var keyFrames = 0
-    private var audioFrames = 0
 
-    init(url: URL, start: Date, slot: Int64, startTime: Int64, codec: VideoCodec,
-         video: CMVideoFormatDescription, audio: CMAudioFormatDescription?) throws {
+    init(url: URL, start: Date, slot: Int64, startTime: Int64, codec: VideoCodec, video: CMVideoFormatDescription) {
         self.url = url
         self.start = start
         self.slot = slot
         self.startTime = startTime
         self.codec = codec
-        self.size = CMVideoFormatDescriptionGetDimensions(video)
+        self.videoFormat = video
+    }
+
+    var hasAudio: Bool { !audio.isEmpty }
+
+    func append(video sample: CMSampleBuffer, isKeyFrame: Bool) {
+        video.append(sample)
+        if isKeyFrame { keyFrames += 1 }
+    }
+
+    /// A file has one audio format: that of its first audio frame. Frames in another format
+    /// are left out; the next file picks the new format up.
+    func append(audio sample: CMSampleBuffer) {
+        guard let format = CMSampleBufferGetFormatDescription(sample) else { return }
+        if audioFormat == nil { audioFormat = format }
+        if CFEqual(format, audioFormat) { audio.append(sample) }
+    }
+
+    /// Writes the file. `end` is the stream time at which the last frame stops being shown.
+    func finish(at end: Int64) async throws -> SegmentRecorder.Segment {
+        let writer: AVAssetWriter
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: url)
@@ -236,67 +272,70 @@ private final class OpenSegment {
         writer.shouldOptimizeForNetworkUse = true
 
         // No output settings: the samples are written as they are.
-        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: video)
-        videoInput.expectsMediaDataInRealTime = true
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: videoFormat)
         guard writer.canAdd(videoInput) else { throw RecordingError.cannotCreateWriter("the video format is not accepted") }
         writer.add(videoInput)
-
         var audioInput: AVAssetWriterInput? = nil
-        if let audio {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audio)
-            input.expectsMediaDataInRealTime = true
+        if let audioFormat, !audio.isEmpty {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioFormat)
             if writer.canAdd(input) {
                 writer.add(input)
                 audioInput = input
             }
         }
-        self.audioInput = audioInput
-        self.audioFormat = audioInput == nil ? nil : audio
+        if audioInput == nil { audio = [] }
 
         guard writer.startWriting() else {
             throw RecordingError.cannotCreateWriter(writer.error?.localizedDescription ?? "unknown error")
         }
         writer.startSession(atSourceTime: CMTime(value: startTime, timescale: 1_000_000))
-    }
 
-    func append(video sample: CMSampleBuffer, isKeyFrame: Bool) async throws {
-        try await append(sample, to: videoInput)
-        videoFrames += 1
-        if isKeyFrame { keyFrames += 1 }
-    }
-
-    func append(audio sample: CMSampleBuffer) async throws {
-        guard let audioInput else { return }
-        try await append(sample, to: audioInput)
-        audioFrames += 1
-    }
-
-    private func append(_ sample: CMSampleBuffer, to input: AVAssetWriterInput) async throws {
-        // Dropping a frame would break the picture until the next key frame, so wait instead.
-        var waited = 0
-        while !input.isReadyForMoreMediaData {
-            guard writer.status == .writing else { break }
-            guard waited < 400 else { throw RecordingError.writerStalled }
-            try? await Task.sleep(for: .milliseconds(5))
-            waited += 1
+        // Feed both tracks in time order. The writer interleaves them and at times refuses
+        // one track until it has more of the other, so offer the other one then.
+        var v = 0, a = 0, idle = 0
+        while v < video.count || a < audio.count {
+            let videoFirst = a >= audio.count || (v < video.count
+                && CMSampleBufferGetPresentationTimeStamp(video[v]) <= CMSampleBufferGetPresentationTimeStamp(audio[a]))
+            var appended = false
+            for isVideo in [videoFirst, !videoFirst] where !appended {
+                if isVideo, v < video.count, videoInput.isReadyForMoreMediaData {
+                    guard videoInput.append(video[v]) else { throw failure(writer) }
+                    v += 1
+                    appended = true
+                    if v == video.count { videoInput.markAsFinished() }
+                } else if !isVideo, a < audio.count, let audioInput, audioInput.isReadyForMoreMediaData {
+                    guard audioInput.append(audio[a]) else { throw failure(writer) }
+                    a += 1
+                    appended = true
+                    if a == audio.count { audioInput.markAsFinished() }
+                }
+            }
+            if appended {
+                idle = 0
+            } else {
+                guard writer.status == .writing else { throw failure(writer) }
+                guard idle < 2500 else {
+                    writer.cancelWriting()
+                    throw RecordingError.writerStalled("frame \(v) of \(video.count), audio frame \(a) of \(audio.count)")
+                }
+                idle += 1
+                try? await Task.sleep(for: .milliseconds(2))
+            }
         }
-        guard input.append(sample) else {
-            throw RecordingError.writerFailed(writer.error?.localizedDescription ?? "sample rejected")
-        }
-    }
+        if video.isEmpty { videoInput.markAsFinished() }
 
-    /// Closes the file. `end` is the stream time at which the last frame stops being shown.
-    func finish(at end: Int64) async throws -> SegmentRecorder.Segment {
-        videoInput.markAsFinished()
-        audioInput?.markAsFinished()
-        writer.endSession(atSourceTime: CMTime(value: max(end, startTime), timescale: 1_000_000))
+        let stop = max(end, startTime)
+        writer.endSession(atSourceTime: CMTime(value: stop, timescale: 1_000_000))
         await writer.finishWriting()
-        guard writer.status == .completed else {
-            throw RecordingError.writerFailed(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")
-        }
+        guard writer.status == .completed else { throw failure(writer) }
+        let size = CMVideoFormatDescriptionGetDimensions(videoFormat)
         let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
-        return SegmentRecorder.Segment(url: url, start: start, duration: Double(max(end, startTime) - startTime) / 1_000_000,
+        return SegmentRecorder.Segment(url: url, start: start, duration: Double(stop - startTime) / 1_000_000,
                                        codec: codec, width: Int(size.width), height: Int(size.height),
-                                       videoFrames: videoFrames, keyFrames: keyFrames, audioFrames: audioFrames, bytes: bytes)
+                                       videoFrames: video.count, keyFrames: keyFrames, audioFrames: audio.count, bytes: bytes)
+    }
+
+    private func failure(_ writer: AVAssetWriter) -> RecordingError {
+        .writerFailed(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")
     }
 }

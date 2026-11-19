@@ -1,4 +1,5 @@
 import Foundation
+import Recording
 import Security
 
 struct CameraSettings: Equatable, Identifiable, Codable {
@@ -72,6 +73,13 @@ enum SettingsStore {
         for camera in cameras {
             Keychain.write(camera.password, service: service, account: account(camera))
         }
+        notifyRecorder()
+    }
+
+    /// Tells the background recorder, a separate process, that cameras or recording settings changed.
+    static func notifyRecorder() {
+        DistributedNotificationCenter.default().postNotificationName(
+            RecordingSettings.changedNotification, object: nil, userInfo: nil, deliverImmediately: true)
     }
 
     private static func account(_ camera: CameraSettings) -> String {
