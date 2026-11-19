@@ -46,6 +46,9 @@ public struct RecordingSettings: Equatable, Sendable {
     public var paddingAfter = 20
     /// Days a kept file stays on this Mac.
     public var localCacheDays = 2
+    /// Override the cameras' own setting for the recording period: cameras with a spotlight
+    /// light it on motion in the dark. Afterwards each camera gets its own setting back.
+    public var floodlight = false
 
     public init() {}
 
@@ -68,6 +71,7 @@ public struct RecordingSettings: Equatable, Sendable {
         public var segmentLength = 60
         public var paddingBefore = 10
         public var paddingAfter = 20
+        public var floodlight = false
 
         public init() {}
     }
@@ -80,6 +84,7 @@ public struct RecordingSettings: Equatable, Sendable {
         p.segmentLength = segmentLength
         p.paddingBefore = paddingBefore
         p.paddingAfter = paddingAfter
+        p.floodlight = floodlight
         return p
     }
 
@@ -100,6 +105,7 @@ public struct RecordingSettings: Equatable, Sendable {
         static let paddingBefore = "recording.paddingBefore"
         static let paddingAfter = "recording.paddingAfter"
         static let localCacheDays = "recording.localCacheDays"
+        static let floodlight = "recording.floodlight"
     }
 
     public static func load(from defaults: UserDefaults = .standard) -> RecordingSettings {
@@ -118,6 +124,7 @@ public struct RecordingSettings: Equatable, Sendable {
         s.paddingBefore = int(Key.paddingBefore, 0...120) ?? s.paddingBefore
         s.paddingAfter = int(Key.paddingAfter, 0...120) ?? s.paddingAfter
         s.localCacheDays = int(Key.localCacheDays, 1...365) ?? s.localCacheDays
+        s.floodlight = defaults.bool(forKey: Key.floodlight)
         return s
     }
 
@@ -132,5 +139,6 @@ public struct RecordingSettings: Equatable, Sendable {
         defaults.set(paddingBefore, forKey: Key.paddingBefore)
         defaults.set(paddingAfter, forKey: Key.paddingAfter)
         defaults.set(localCacheDays, forKey: Key.localCacheDays)
+        defaults.set(floodlight, forKey: Key.floodlight)
     }
 }

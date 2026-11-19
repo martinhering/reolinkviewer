@@ -225,6 +225,7 @@ struct BCTool {
                 parameters.segmentLength = Int(options["segment"] ?? "60") ?? 60
                 parameters.paddingBefore = Int(options["before"] ?? "10") ?? 10
                 parameters.paddingAfter = Int(options["after"] ?? "20") ?? 20
+                parameters.floodlight = flags.contains("floodlight")
                 let recorder = CameraRecorder(
                     camera: RecorderCamera(id: UUID(), name: host, host: host, port: port, username: user, password: password),
                     parameters: parameters, directory: URL(fileURLWithPath: out, isDirectory: true),
@@ -532,7 +533,7 @@ struct BCTool {
           bctool record --host H --out DIR [--sub] [--seconds 180] [--segment 60] [--no-audio]
                                                              (MP4 files cut on the wall clock, no re-encoding; prints motion events)
           bctool recorder --host H --out DIR [--seconds 180] [--segment 60] [--before 10] [--after 20]
-                          [--sub] [--no-audio] [--keep-all] [--frame-size]
+                          [--sub] [--no-audio] [--keep-all] [--frame-size] [--floodlight]
                                                              (the background recorder for one camera: keeps only segments
                                                               with motion; --frame-size judges motion by frame sizes)
           bctool sizes  --host H [--sub] [--seconds 60]      (P-frame bytes per second, the frame-size motion detector

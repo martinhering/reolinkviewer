@@ -89,6 +89,9 @@ public final class CameraRecorder: @unchecked Sendable {
         let pending = Self.pendingDirectory(in: directory)
         // Whatever a crashed run left behind was never judged.
         try? FileManager.default.removeItem(at: pending)
+        // A run that could not put the spotlight setting back left a note; honour it now if
+        // the floodlight is no longer wanted.
+        if !parameters.floodlight { await restoreFloodlight() }
         let motion = MotionState()
         var undecided: [SegmentRecorder.Segment] = []
         var backoff = 1.0
@@ -99,6 +102,7 @@ public final class CameraRecorder: @unchecked Sendable {
                                            recordAudio: parameters.audio)
             do {
                 try await client.connect()
+                await enableFloodlight(on: client)
                 var detector: FrameSizeMotionDetector? = nil
                 if forceFrameSizeDetection {
                     detector = FrameSizeMotionDetector()
@@ -156,7 +160,53 @@ public final class CameraRecorder: @unchecked Sendable {
             backoff = min(backoff * 2, 30)
         }
         judge(&undecided, motion: motion, now: Date(), force: true)
+        // In a task of its own: this one is cancelled, and a cancelled task cannot wait for
+        // the camera's answer.
+        await Task { await self.restoreFloodlight() }.value
         log("stopped")
+    }
+
+    // MARK: Floodlight
+
+    /// Holds the camera's own setting from before the recording period for as long as the
+    /// recorder has changed it, so that it survives a crash.
+    private var floodlightNote: URL { directory.appendingPathComponent("floodlight-before") }
+
+    /// Makes the camera light its spotlight on motion in the dark, remembering how it was
+    /// set. Does nothing for a camera without a spotlight.
+    private func enableFloodlight(on client: BaichuanCamera) async {
+        // A camera without a spotlight may still answer the settings request, so ask first.
+        guard parameters.floodlight, await client.hasSpotlight(),
+              let automatic = try? await client.getSpotlightAutomatic() else { return }
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: floodlightNote.path) {
+            guard !automatic else { return }  // already as wanted: nothing to put back later
+            try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? Data("0".utf8).write(to: floodlightNote)
+        }
+        guard !automatic else { return }
+        do {
+            try await client.setSpotlightAutomatic(true)
+            log("smart floodlight switched on for the recording period")
+        } catch {
+            log("could not switch the smart floodlight on: \(error)")
+        }
+    }
+
+    /// Puts the camera's spotlight setting back to what it was before the recording period.
+    private func restoreFloodlight() async {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: floodlightNote.path) else { return }
+        let client = BaichuanCamera(host: camera.host, port: camera.port, username: camera.username, password: camera.password)
+        do {
+            try await client.connect()
+            try await client.setSpotlightAutomatic(false)
+            try? fm.removeItem(at: floodlightNote)
+            log("smart floodlight set back to off, as before recording")
+        } catch {
+            log("could not switch the smart floodlight off again, will retry at the next start: \(error)")
+        }
+        await client.disconnect()
     }
 
     /// Keeps or deletes every segment that can be judged: `paddingBefore` seconds after its

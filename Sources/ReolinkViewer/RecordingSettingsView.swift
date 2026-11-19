@@ -54,8 +54,12 @@ struct RecordingSettingsView: View {
                 Stepper("File length: \(settings.segmentLength) s", value: $settings.segmentLength, in: 10...600, step: 10)
                 Stepper("Keep \(settings.paddingBefore) s before motion", value: $settings.paddingBefore, in: 0...120, step: 5)
                 Stepper("Keep \(settings.paddingAfter) s after motion", value: $settings.paddingAfter, in: 0...120, step: 5)
+                Toggle("Smart floodlight while recording", isOn: $settings.floodlight)
             } footer: {
-                footnote("A file is kept if motion, widened by these seconds, touches it. The camera's own motion detector decides what motion is.")
+                VStack(alignment: .leading, spacing: 4) {
+                    footnote("A file is kept if motion, widened by these seconds, touches it. The camera's own motion detector decides what motion is.")
+                    footnote("Normally each camera follows its own spotlight setting. With this option the recorder overrides it for the recording period: cameras that have a spotlight light it on motion in the dark. When recording stops, each camera gets back the setting it had before.")
+                }
             }
 
             Section {

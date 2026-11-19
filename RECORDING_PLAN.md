@@ -111,6 +111,7 @@ All recording settings live in one Recording tab and apply to every camera.
 | Keep (motion only or everything) | Motion only |
 | Segment length | 60 s |
 | Padding before and after motion | 10 s and 20 s |
+| Smart floodlight while recording | Off |
 | Local cache | 2 days |
 | Endpoint, region, bucket | None, entered in storage setup |
 | Access keys and passphrase | None, entered in storage setup, stored in the keychain |

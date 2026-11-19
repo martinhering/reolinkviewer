@@ -55,6 +55,7 @@ final class RecordingSettingsTests: XCTestCase {
         XCTAssertEqual(s.keep, .motionOnly)
         XCTAssertEqual([s.segmentLength, s.paddingBefore, s.paddingAfter, s.localCacheDays], [60, 10, 20, 2])
         XCTAssertFalse(s.isActive(at: Date()))
+        XCTAssertFalse(s.floodlight)
     }
 
     func testRoundTrip() {
@@ -70,6 +71,7 @@ final class RecordingSettingsTests: XCTestCase {
         s.paddingBefore = 5
         s.paddingAfter = 15
         s.localCacheDays = 7
+        s.floodlight = true
         s.save(to: defaults)
         XCTAssertEqual(RecordingSettings.load(from: defaults), s)
         s.startMinute = nil

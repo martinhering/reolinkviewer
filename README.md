@@ -122,6 +122,10 @@ the files in which something moved. The settings apply to all cameras.
   the camera. A file is kept if motion, widened by 10 s before and 20 s after, touches it;
   the decision falls 10 s after the file closes, and every other file is deleted. A camera
   that pushes no motion events is judged by the size of its predicted frames instead.
+- **Smart floodlight** (optional): for the recording period the recorder switches on the
+  camera's own "light on motion in the dark", on cameras that have a spotlight. When
+  recording stops, each camera gets back the setting it had before. Outside the recording
+  period the recorder never touches it.
 - **Clean-up:** kept files are deleted from the Mac after 2 days (adjustable).
 - **Log:** `~/Library/Logs/ReolinkViewer/recorder.log` says what was kept, deleted and uploaded.
 
