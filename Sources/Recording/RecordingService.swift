@@ -158,6 +158,9 @@ public actor RecordingService {
                 camerasLoaded = now
             }
             preventSleep()
+        } else if settings.isActive(at: now.addingTimeInterval(TimeInterval(PowerSchedule.leadSeconds) + 30)) {
+            // The window opens in a moment, and the Mac may just have been woken for it.
+            preventSleep()
         } else {
             allowSleep()
         }

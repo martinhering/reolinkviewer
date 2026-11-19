@@ -110,6 +110,10 @@ the files in which something moved. The settings apply to all cameras.
   login and keeps it running while the app is closed. It keeps the Mac awake during the
   window and is idle outside it. This needs the built app (`build-app.sh`), signed with a
   certificate; see [Signing](#signing-and-notarizing-a-release).
+- **Sleep:** a sleeping Mac records nothing, and the recorder cannot wake it. *Wake this
+  Mac* sets the Mac's repeating power schedule (`pmset repeat`) to two minutes before the
+  window starts; macOS asks for an administrator password, and a schedule that is already
+  there is replaced. From then until the window closes the recorder keeps the Mac awake.
 - **Files** are MP4, one per minute, cut at the first key frame after each full minute and
   written without re-encoding, with sound. They are in
   `~/Library/Application Support/ReolinkViewer/Recordings/<camera id>/yyyy-MM-dd/HHmmssZ_60s.mp4`,

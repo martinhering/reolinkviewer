@@ -11,6 +11,9 @@ struct RecordingSettingsView: View {
     @State private var agentStatus = RecorderAgent.statusText
     @State private var agentError: String?
     @State private var storage = StorageSettings.load()
+    /// The Mac's repeating wake event; nil when there is none (or it is not read yet).
+    @State private var wake: PowerSchedule.Wake?
+    @State private var wakeError: String?
     @State private var settingUpStorage = false
 
     var body: some View {
@@ -19,8 +22,23 @@ struct RecordingSettingsView: View {
                 Toggle("Record all cameras", isOn: $settings.enabled)
                 DatePicker("Start", selection: time(\.startMinute, fallback: 22 * 60), displayedComponents: .hourAndMinute)
                 DatePicker("Stop", selection: time(\.stopMinute, fallback: 6 * 60), displayedComponents: .hourAndMinute)
+                LabeledContent("Wake this Mac") {
+                    HStack {
+                        Text(wakeStatus).foregroundStyle(.secondary)
+                        if wake?.minute != wantedWakeMinute || wake?.isEveryDay != true {
+                            Button("Wake at \(Self.timeText(wantedWakeMinute))…") { setWake(wantedWakeMinute) }
+                        }
+                        if wake != nil {
+                            Button("Remove…") { setWake(nil) }
+                        }
+                    }
+                }
             } footer: {
-                footnote(windowHint)
+                VStack(alignment: .leading, spacing: 4) {
+                    footnote(windowHint)
+                    footnote("A sleeping Mac records nothing. The wake time is the Mac's own repeating power schedule: setting it asks for an administrator password and replaces a schedule that is already there. A laptop must be on power.")
+                    if let wakeError { footnote(wakeError).foregroundStyle(.red) }
+                }
             }
 
             Section {
@@ -104,9 +122,41 @@ struct RecordingSettingsView: View {
             }
         }
         .onAppear {
+            refreshWake()
             storage = StorageSettings.load()
             settings = RecordingSettings.load()
             agentStatus = RecorderAgent.statusText
+        }
+    }
+
+    // MARK: Wake schedule
+
+    /// Two minutes before the window starts.
+    private var wantedWakeMinute: Int {
+        PowerSchedule.wakeMinute(forStart: settings.startMinute ?? 22 * 60)
+    }
+
+    private var wakeStatus: String {
+        guard let wake else { return "Not scheduled" }
+        return "At \(Self.timeText(wake.minute)) \(wake.days)"
+    }
+
+    static func timeText(_ minute: Int) -> String {
+        String(format: "%02d:%02d", minute / 60, minute % 60)
+    }
+
+    private func refreshWake() {
+        Task {
+            wake = await Task.detached { WakeSchedule.current() }.value
+        }
+    }
+
+    private func setWake(_ minute: Int?) {
+        wakeError = nil
+        Task {
+            let failure = await Task.detached { WakeSchedule.set(minute) }.value
+            wakeError = failure
+            refreshWake()
         }
     }
 

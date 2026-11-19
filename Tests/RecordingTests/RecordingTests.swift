@@ -252,3 +252,38 @@ final class RecordingStoreTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: pending.path))
     }
 }
+
+final class PowerScheduleTests: XCTestCase {
+    func testReadsTheRepeatingWake() {
+        let output = """
+        Repeating power events:
+          wakepoweron at 7:58PM every day
+        Scheduled power events:
+         [0]  wake at 11/20/2026 03:00:00 by 'com.apple.alarm.user-visible'
+        """
+        XCTAssertEqual(PowerSchedule.parseRepeatingWake(output), PowerSchedule.Wake(minute: 19 * 60 + 58, days: "every day"))
+        XCTAssertEqual(PowerSchedule.parseRepeatingWake(output)?.isEveryDay, true)
+    }
+
+    func testIgnoresOneOffEventsAndRepeatingSleep() {
+        XCTAssertNil(PowerSchedule.parseRepeatingWake(""))
+        XCTAssertNil(PowerSchedule.parseRepeatingWake("Scheduled power events:\n [0]  wake at 11/20/2026 03:00:00 by 'x'\n"))
+        let both = "Repeating power events:\n  sleep at 11:00PM every day\n  wake at 6:30AM weekdays only\n"
+        XCTAssertEqual(PowerSchedule.parseRepeatingWake(both), PowerSchedule.Wake(minute: 390, days: "weekdays only"))
+        XCTAssertEqual(PowerSchedule.parseRepeatingWake(both)?.isEveryDay, false)
+    }
+
+    func testClockForms() {
+        XCTAssertEqual(PowerSchedule.minute(of: "12:05AM"), 5)
+        XCTAssertEqual(PowerSchedule.minute(of: "12:00PM"), 720)
+        XCTAssertEqual(PowerSchedule.minute(of: "19:58"), 1198)
+        XCTAssertNil(PowerSchedule.minute(of: "soon"))
+    }
+
+    func testWakesTwoMinutesBeforeTheWindow() {
+        XCTAssertEqual(PowerSchedule.wakeMinute(forStart: 20 * 60), 19 * 60 + 58)
+        XCTAssertEqual(PowerSchedule.wakeMinute(forStart: 1), 1439, "wraps over midnight")
+        XCTAssertEqual(PowerSchedule.pmsetTime(19 * 60 + 58), "19:58:00")
+        XCTAssertEqual(PowerSchedule.pmsetTime(5), "00:05:00")
+    }
+}

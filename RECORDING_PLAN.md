@@ -54,7 +54,7 @@ These choices are settled and the rest of the plan builds on them.
 
 The recorder is the app itself, started without a window by a LaunchAgent, with its own connection to each camera.
 
-- **Process:** it runs while the app is closed. The Mac must be logged in, and the recorder keeps it from sleeping during the window.
+- **Process:** it runs while the app is closed. The Mac must be logged in, and the recorder keeps it from sleeping during the window. It cannot wake a sleeping Mac; for that, Settings can set the Mac's repeating wake time to two minutes before the window, with an administrator password.
 - **Window:** one start and one stop time in the Mac's local time, which may wrap over midnight. Outside the window the recorder logs out and pulls no stream.
 - **Minute files:** the H.264 or H.265 video and the AAC sound go into an MP4 without re-encoding. Files are cut on the wall-clock minute for all cameras, at the first key frame after each `:00`. The running minute is held in memory and written when it closes, because a writer fed frame by frame stalls when a camera on a weak link drops its sound. Holes in the sound are filled with silence, so the sound after them stays in step.
 - **Undecided files:** a closed minute waits in the camera's `pending` folder and moves to its dated folder only when it is kept. A restart clears `pending`.
