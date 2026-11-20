@@ -51,6 +51,17 @@ public actor RecordingService {
     private let loadSettings: @Sendable () -> RecordingSettings
     private let loadCameras: @Sendable () -> [RecorderCamera]
     private let loadStorage: @Sendable () -> StorageSetup?
+    private let onStatus: @Sendable (Status) -> Void
+
+    /// What the recorder is doing, for display.
+    public struct Status: Equatable, Sendable {
+        /// The daily window is open.
+        public var recording = false
+        /// Names of the cameras being recorded.
+        public var cameras: [String] = []
+
+        public init() {}
+    }
 
     private struct Running {
         let camera: RecorderCamera
@@ -64,6 +75,7 @@ public actor RecordingService {
     private var lastCleanup = Date.distantPast
     private var awake: NSObjectProtocol?
     private var wasActive: Bool?
+    private var lastStatus: Status?
     private var storageStale = true
     private var storageFingerprint: String?
     private var uploader: Uploader?
@@ -75,15 +87,18 @@ public actor RecordingService {
     ///     `configurationChanged()`. May read the keychain.
     ///   - loadStorage: called at the start and after `configurationChanged()`; nil while no
     ///     off-site storage is set up. Kept files then stay on the Mac as they are.
+    ///   - onStatus: called at the start and whenever the status changes.
     public init(directory: URL = RecordingStore.defaultDirectory, log: @escaping @Sendable (String) -> Void,
                 loadSettings: @escaping @Sendable () -> RecordingSettings,
                 loadCameras: @escaping @Sendable () -> [RecorderCamera],
-                loadStorage: @escaping @Sendable () -> StorageSetup? = { nil }) {
+                loadStorage: @escaping @Sendable () -> StorageSetup? = { nil },
+                onStatus: @escaping @Sendable (Status) -> Void = { _ in }) {
         self.directory = directory
         self.log = log
         self.loadSettings = loadSettings
         self.loadCameras = loadCameras
         self.loadStorage = loadStorage
+        self.onStatus = onStatus
     }
 
     /// Runs until the task is cancelled, then stops every recorder and returns.
@@ -97,6 +112,7 @@ public actor RecordingService {
         uploadTask?.cancel()
         await uploadTask?.value
         allowSleep()
+        onStatus(Status())
         log("recorder stopped")
     }
 
@@ -165,6 +181,14 @@ public actor RecordingService {
             allowSleep()
         }
         await reconcile(with: active ? cameras : [], parameters: settings.parameters)
+
+        var status = Status()
+        status.recording = active
+        status.cameras = active ? cameras.map { $0.name.isEmpty ? $0.host : $0.name } : []
+        if status != lastStatus {
+            lastStatus = status
+            onStatus(status)
+        }
 
         if now.timeIntervalSince(lastCleanup) >= 3600 {
             lastCleanup = now

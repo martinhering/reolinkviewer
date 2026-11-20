@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Recording
 import Security
@@ -22,6 +23,7 @@ enum RecorderProcess {
             log.write("another recorder is already running on \(directory.path); leaving")
             exit(0)
         }
+        let statusItem = MainActor.assumeIsolated { RecorderStatusItem() }
         let service = RecordingService(
             directory: directory, log: { log.write($0) },
             loadSettings: { RecordingSettings.load() },
@@ -31,7 +33,8 @@ enum RecorderProcess {
                                    username: $0.username, password: $0.password)
                 }
             },
-            loadStorage: { StorageStore.loadSetup() })
+            loadStorage: { StorageStore.loadSetup() },
+            onStatus: { status in Task { @MainActor in statusItem.show(status) } })
         let task = Task { await service.run() }
 
         // The app tells us when cameras or settings were saved.
@@ -57,9 +60,16 @@ enum RecorderProcess {
             source.resume()
             sources.append(source)
         }
+        // An application without Dock icon or windows, so that it can show the menu bar icon.
         withExtendedLifetime((observer, sources)) {
-            dispatchMain()
+            MainActor.assumeIsolated {
+                let app = NSApplication.shared
+                app.setActivationPolicy(.accessory)
+                app.delegate = statusItem
+                app.run()
+            }
         }
+        exit(0)
     }
 }
 

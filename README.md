@@ -128,6 +128,9 @@ the files in which something moved. The settings apply to all cameras.
   period the recorder never touches it.
 - **Clean-up:** kept files are deleted from the Mac after 2 days (adjustable).
 - **Log:** `~/Library/Logs/ReolinkViewer/recorder.log` says what was kept, deleted and uploaded.
+- **Menu bar:** while the background recorder runs it shows a camera in the menu bar: outlined
+  while it waits for the recording period, red while it records. Its menu says which cameras
+  are being recorded and until when, and opens the app or the log.
 
 ### Off-site storage
 
